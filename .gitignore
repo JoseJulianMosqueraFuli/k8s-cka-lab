@@ -1,0 +1,18 @@
+# Kubernetes
+kubeconfig
+*.kubeconfig
+.kube/
+
+# Solutions (keep in git but remind to not peek)
+# solutions/ is tracked — honor system!
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Vagrant
+.vagrant/
+
+# Temp
+*.tmp
+*.bak

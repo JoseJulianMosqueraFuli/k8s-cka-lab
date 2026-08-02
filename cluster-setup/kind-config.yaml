@@ -1,0 +1,29 @@
+# kind cluster con 1 control-plane + 2 workers (simula entorno CKA)
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: cka-lab
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "node-role.kubernetes.io/control-plane="
+  - role: worker
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "node-role.kubernetes.io/worker=worker-1"
+  - role: worker
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "node-role.kubernetes.io/worker=worker-2"
+networking:
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/16"
