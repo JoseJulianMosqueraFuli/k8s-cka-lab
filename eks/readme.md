@@ -1,20 +1,32 @@
 # Labs de EKS — de lo básico a lo específico
 
-Ruta de práctica para entender EKS por capas. Cada lab levanta un cluster desde
-la consola de AWS, despliega nginx expuesto a internet, y lo destruye. La
-diferencia entre labs es **quién gestiona el cómputo y qué tienes que instalar tú**.
+Ruta de práctica para entender EKS por capas, en tres niveles: **fundamentos**
+(levantar un cluster), **operación** (mantenerlo vivo) y **producción** (operarlo
+en equipo sin tocarlo a mano). Los tres primeros labs están hechos; del 04 al 10
+están diseñados en el [roadmap](#roadmap).
 
-## Orden propuesto
+Cada lab de nivel 1 levanta un cluster desde la consola de AWS, despliega nginx
+expuesto a internet, y lo destruye. La diferencia entre ellos es **quién gestiona
+el cómputo y qué tienes que instalar tú**.
+
+> Antes de tomar estos labs como referencia de cómo se opera EKS en producción, lee
+> [Alcance y límites](#alcance-y-límites-esto-es-un-lab-no-producción). La mecánica
+> es correcta; el proceso no es el de un ambiente productivo, y es a propósito.
+
+## Nivel 1 · Fundamentos — orden propuesto
 
 | #   | Lab                                     | Qué aprendes                                                            | Por qué va en esta posición                                                                                          |
 | --- | --------------------------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | 1   | [`eks-fargate-lab`](eks-fargate-lab/)   | Fargate profiles, IRSA + OIDC, AWS Load Balancer Controller con Helm    | Es el que más piezas te obliga a montar a mano. Aquí ves _por qué_ existe cada componente                            |
 | 2   | [`eks-ec2-lab`](eks-ec2-lab/)           | Managed Node Groups, kube-proxy, cloud-controller-manager, AMIs, sizing | Después de pelear con Fargate, aprecias que un `Service` tipo LoadBalancer funcione sin instalar nada                |
 | 3   | [`eks-automode-lab`](eks-automode-lab/) | Auto Mode, NodePools, Karpenter, controllers integrados                 | Cierra la ruta: AWS te quita de encima todo lo de los labs 1 y 2. Solo entiendes el valor si antes lo hiciste a mano |
+| 4   | `eks-ingress-lab` 📋                    | Ingress + ALB, HTTPS con ACM, imagen propia en ECR                      | Los tres primeros paran en NLB capa 4 con una imagen pública. Esto es cómo se expone una app de verdad               |
 
-La lógica es **fricción decreciente**: empiezas donde tienes que ensamblar todo y
-terminas donde no ensamblas nada. Los READMEs se referencian entre sí en ese orden
-(el de EC2 compara contra Fargate, el de Auto Mode contra los dos).
+La lógica de los primeros tres es **fricción decreciente**: empiezas donde tienes
+que ensamblar todo y terminas donde no ensamblas nada. Los READMEs se referencian
+entre sí en ese orden (el de EC2 compara contra Fargate, el de Auto Mode contra
+los dos). El 04 cierra el nivel con el patrón de exposición que sí se usa en
+producción.
 
 > Si tu objetivo es solo "tener un cluster corriendo hoy", el orden inverso es más
 > rápido. Este orden está optimizado para aprender, no para llegar rápido.
@@ -176,13 +188,65 @@ costo por hora de lo que encuentre para que sepas si urge.
    momento de leer el siguiente paso del README, no de irte.
 4. **Destruye el mismo día.** Un cluster olvidado un fin de semana son ~$8.
 
-## Roadmap: 3 labs avanzados
+## Roadmap
 
-Los tres labs actuales cubren "levantar un cluster y exponer una app". Estos tres
-cubren lo que viene después. Cada uno agrupa varios temas alrededor de una
-pregunta, para que no sean recetas sueltas.
+Los labs se organizan en tres niveles. Cada uno responde una pregunta distinta, y
+el salto entre niveles importa más que los labs individuales.
 
-### 04 · Identidad y permisos — IRSA vs EKS Pod Identity
+| Nivel                     | Labs  | Pregunta                                      | Estado           |
+| ------------------------- | ----- | --------------------------------------------- | ---------------- |
+| **1 · Fundamentos**       | 01-04 | ¿cómo levanto un cluster y expongo una app?   | 01-03 ✅ · 04 📋 |
+| **2 · Operación (día 2)** | 05-08 | ¿cómo lo mantengo vivo?                       | 📋 diseñados     |
+| **3 · Producción**        | 09-13 | ¿cómo lo operamos varios, sin tocarlo a mano? | 📋 diseñados     |
+
+El nivel 3 es el que separa "sé usar EKS" de "sé operar EKS en producción con un
+equipo". No cambia la tecnología, cambia el proceso.
+
+Cada nivel tiene un lab que cierra su hueco más grande: el **04** (exponer de
+verdad), el **07** (red y aislamiento) y el **13** (costo). Lo que queda fuera a
+propósito está en [vacíos conscientes](#vacíos-conscientes).
+
+---
+
+## Nivel 1 · lo que falta
+
+### 04 · Exponer de verdad — Ingress, HTTPS y tu propia imagen
+
+**Pregunta:** ¿cómo se publica una app real, no un nginx de demo?
+
+Este era el hueco más grande del nivel 1. Los tres labs actuales terminan con un
+`Service` tipo LoadBalancer en capa 4, sirviendo HTTP plano, con una imagen pública
+de Docker Hub. Nada de eso pasa en producción.
+
+- **Ingress + ALB** en vez de Service/NLB: `ingressClassName: alb`, routing por
+  path (`/api`, `/web`) y por host, un solo ALB para varios servicios. Entender que
+  un Ingress es capa 7 y por eso puede hacer lo que el NLB no.
+- **HTTPS con ACM:** certificado validado por DNS, anotación
+  `alb.ingress.kubernetes.io/certificate-arn`, redirect de HTTP a HTTPS. Sin TLS no
+  hay producción.
+- **Tu propia imagen en ECR:** construirla, etiquetarla con el SHA del commit o un
+  digest (nunca `:latest`), empujarla, y que el cluster la baje del registry
+  privado. Aquí por fin se usa el permiso de ECR del node role que en los labs 1-3
+  estaba configurado pero nunca se ejercitaba.
+- **Por qué importa el registry privado:** Docker Hub tiene rate limits. Un cluster
+  que escala y jala `nginx:alpine` de Docker Hub falla con `ImagePullBackOff` justo
+  cuando más nodos necesitas. Es un incidente clásico.
+- **Health checks:** readiness y liveness probes conectadas al health check del
+  target group, y ver la diferencia entre "el pod arrancó" y "el pod puede recibir
+  tráfico".
+
+Se monta sobre el cluster del lab 2 o 3. Conecta con `domains/03-services-networking`
+(20% del CKA). **~2h.**
+
+---
+
+## Nivel 2 · Operación (día 2)
+
+El nivel 1 cubre "levantar un cluster y exponer una app". Estos cuatro cubren lo
+que viene después. Cada uno agrupa varios temas alrededor de una pregunta, para que
+no sean recetas sueltas.
+
+### 05 · Identidad y permisos — IRSA vs EKS Pod Identity
 
 **Pregunta:** ¿cómo obtiene credenciales de AWS un pod, y cómo obtiene acceso al
 cluster una persona?
@@ -201,7 +265,7 @@ cluster una persona?
 Se monta sobre el cluster del lab 2 (EC2). Reutiliza lo que ya sabes de OIDC del
 lab 1. **~1h 30m.**
 
-### 05 · Estado y escala — storage persistente + autoscaling bajo carga
+### 06 · Estado y escala — storage persistente, autoscaling y backup
 
 **Pregunta:** ¿qué pasa cuando la app tiene estado y el tráfico sube?
 
@@ -215,35 +279,316 @@ lab 1. **~1h 30m.**
   el autoscaler de nodos reacciona.
 - **Karpenter consolidando:** bajar la carga y ver cómo apaga nodos, con un PDB
   puesto para que no rompa nada al hacerlo.
-- Cierre: `reclaimPolicy` y por qué un `kubectl delete pvc` mal hecho te deja
-  volúmenes EBS cobrando (esto ya está mitigado en `eks-automode-lab/destroy.sh`).
+- `reclaimPolicy` y por qué un `kubectl delete pvc` mal hecho te deja volúmenes EBS
+  cobrando (esto ya está mitigado en `eks-automode-lab/destroy.sh`).
+- **Backup con Velero, y un restore de verdad.** Un backup que nunca se restauró no
+  es un backup, es una suposición. El lab borra el namespace completo a propósito y
+  lo recupera: manifests y volúmenes. Aquí también se ve la diferencia entre un
+  snapshot de EBS (bloque, ata la AZ) y un backup lógico (portable entre clusters),
+  y por qué eso decide si puedes recuperarte en otra región.
 
 Se monta sobre el cluster del lab 3 (Auto Mode), que ya trae EBS CSI y Karpenter.
-Conecta directo con `domains/04-storage` y `domains/02-workloads`. **~2h.**
+Conecta directo con `domains/04-storage` y `domains/02-workloads`. **~2h 30m.**
 
-### 06 · Día 2 — upgrade, observabilidad y troubleshooting
+### 07 · Red y aislamiento — quién habla con quién
 
-**Pregunta:** el cluster ya está en producción. ¿cómo lo operas sin tumbarlo?
+**Pregunta:** dentro del cluster todo se ve entre sí. ¿cómo se pone un límite?
 
-- **Observabilidad primero,** para tener con qué mirar lo demás: CloudWatch
-  Container Insights + Fluent Bit, control plane logs encendidos a propósito
-  (y apagados al terminar, que es la parte que los labs actuales se saltan).
-- **Upgrade en orden:** control plane → node group → add-ons. Con un PDB y un
-  deployment con réplicas para ver el drain respetando la disponibilidad, y qué
-  pasa si el PDB es demasiado estricto y el drain se queda colgado.
-- **Escenarios rotos a propósito**, cada uno con un síntoma distinto:
-  - subnet pública sin el tag `kubernetes.io/role/elb` → el LB no se crea
-  - security group del nodo bloqueando el health check → targets unhealthy
-  - Access Entry faltante → `the server has asked for the client to provide credentials`
-  - CIDR de subnet agotado → pods en Pending sin razón aparente
-  - add-on de una versión incompatible con el control plane
-- Método, no recetas: `kubectl describe` → eventos → logs del componente →
-  CloudWatch. El objetivo es que reconozcas el síntoma, no que memorices el fix.
+Por defecto, en Kubernetes **cualquier pod puede hablar con cualquier pod**, en
+cualquier namespace. Es el hallazgo que más sorprende a quien viene de VMs con
+security groups, y no se toca en ningún lab anterior.
 
-Para esta parte conviene un cluster desechable rápido: un `cluster.yaml` de
-`eksctl` que lo levante en un comando. Cierra el círculo — ya sabes qué hay
-debajo porque lo hiciste a mano tres veces. `domains/05-troubleshooting` es 30%
-del CKA. **~2h 30m.**
+- **NetworkPolicy default-deny** por namespace, y después abrir solo lo necesario.
+  Comprobarlo con un pod de pruebas: antes llega, después no. En el lab 11 Kyverno
+  las **genera** solas; aquí las escribes a mano para entender qué generan.
+- **Cómo se implementan en EKS:** el VPC CNI las soporta de forma nativa desde
+  1.25, sin instalar Calico ni Cilium. Vale saber qué límites tiene esa
+  implementación frente a un CNI completo.
+- **Service discovery y CoreDNS:** el FQDN
+  `servicio.namespace.svc.cluster.local`, qué resuelve y qué no, y por qué un
+  `nslookup` fallido es el síntoma más común de un problema de red.
+- **VPC CNI e IPs:** cada pod consume una IP real del VPC. Contar cuántos pods caben
+  por tipo de instancia, y usar **prefix delegation** para multiplicar esa densidad.
+  Esta es la raíz del "pods en Pending sin razón" del lab 08.
+- **Security groups para pods:** cuando un pod necesita hablar con un RDS que solo
+  acepta un SG específico. Es el puente entre el mundo Kubernetes y el mundo VPC.
+- **Aislamiento por equipo:** `ResourceQuota` y `LimitRange` para que un namespace
+  no se coma el cluster, más RBAC por equipo. El namespace como frontera real, no
+  como carpeta decorativa.
+
+`domains/03-services-networking` es 20% del CKA y las NetworkPolicies salen en el
+examen. **~2h 30m.**
+
+### 08 · Troubleshooting — romper a propósito y diagnosticar
+
+**Pregunta:** algo no funciona y el error no dice qué. ¿cómo llego a la causa?
+
+Cada escenario se rompe a propósito y produce un síntoma **distinto**, para que
+aprendas a mapear síntoma → capa donde buscar:
+
+| Rompemos                                        | Síntoma que ves                                              | Capa                    |
+| ----------------------------------------------- | ------------------------------------------------------------ | ----------------------- |
+| Subnet pública sin tag `kubernetes.io/role/elb` | El Service queda en `<pending>` para siempre                 | AWS / tags              |
+| Security group del nodo bloquea el health check | LB creado, targets `unhealthy`, 503                          | AWS / red               |
+| Access Entry faltante                           | `the server has asked for the client to provide credentials` | IAM / autenticación     |
+| CIDR de subnet agotado                          | Pods en `Pending`, sin mensaje claro de por qué              | VPC CNI / IPs           |
+| Add-on con versión incompatible                 | CoreDNS en `CrashLoopBackOff` tras un upgrade                | Add-ons                 |
+| PDB demasiado estricto                          | `kubectl drain` colgado indefinidamente                      | Kubernetes / scheduling |
+| Request de recursos imposible                   | `0/2 nodes are available: insufficient cpu`                  | Scheduling              |
+
+Método, no recetas: `kubectl describe` → eventos → logs del componente →
+CloudWatch → API de AWS. El objetivo es reconocer el síntoma, no memorizar el fix.
+
+Para este lab conviene un cluster desechable: un `cluster.yaml` de `eksctl` que lo
+levante en un comando, porque lo vas a romper varias veces. `domains/05-troubleshooting`
+es 30% del CKA. **~2h 30m.**
+
+---
+
+## Nivel 3 · Producción
+
+Aquí no cambia la tecnología, cambia **quién hace las cosas y cómo**. Estos cinco
+labs son los que te dan el vocabulario para operar con un equipo distribuido: si
+tres personas en tres husos horarios tocan el mismo cluster, la única forma de que
+no se pisen es que el estado deseado viva en Git y nadie tenga que preguntar.
+
+### 09 · Infraestructura como código + GitOps + entrega
+
+**Pregunta:** ¿cómo dejamos de tocar la consola sin perder el control?
+
+Dos mitades que se suelen confundir y no son lo mismo:
+
+- **La infra (el cluster) con IaC.** El mismo cluster de los labs 1-3, pero
+  declarado. Comparar las dos opciones reales:
+
+  | Herramienta                                 | Cuándo gana                                                                                           | Límite                                                             |
+  | ------------------------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+  | **eksctl** (`cluster.yaml`)                 | Rápido, específico de EKS, ideal para clusters desechables y para el lab 08                           | Solo gestiona EKS. Tu RDS, S3 y Route 53 quedan fuera              |
+  | **Terraform** (`terraform-aws-modules/eks`) | Todo tu stack en un solo lenguaje y un solo state. Es lo que usan la mayoría de equipos en producción | Más ceremonia: state remoto, locking, y hay que entender el módulo |
+
+  El lab hace las dos, en ese orden. `eksctl` primero para ver que "declarativo"
+  no es magia; Terraform después con state en S3 + locking, `plan` antes de
+  `apply`, y el `plan` revisado en un PR.
+
+- **Las apps con GitOps.** Argo CD (o Flux) sincronizando desde un repo. El
+  momento que enseña el lab: haces `kubectl scale` a mano y ves cómo Argo lo
+  revierte solo. Ahí entiendes qué significa "Git es la fuente de verdad" y por
+  qué el drift deja de ser un problema invisible.
+
+- **La entrega de la app.** GitOps resuelve "qué está desplegado", no "cómo llegó
+  ahí". El pipeline completo: build → test → escaneo de la imagen → push a ECR con
+  el SHA del commit → actualizar el manifest → Argo sincroniza. Aquí se ve por qué
+  el `:latest` del lab 04 era mala idea: sin tag inmutable, GitOps no puede
+  detectar que hubo un cambio.
+- **Progressive delivery:** Argo Rollouts o Flagger para un canary de verdad — 10%
+  del tráfico a la versión nueva, métricas evaluadas automáticamente, rollback si
+  el error rate sube. Es lo que hace que desplegar deje de dar miedo.
+
+- **El cierre:** un cambio de principio a fin. PR → review → merge → pipeline
+  aplica → Argo sincroniza → canary → promoción. Sin que nadie abriera la consola.
+
+**~3h 30m.** Es el lab más largo y el que más rinde.
+
+### 10 · Upgrade sin downtime — in-place vs blue/green
+
+**Pregunta:** hay tráfico encima. ¿cómo subo de versión sin tumbar nada?
+
+Cada minor de Kubernetes tiene ~14 meses de soporte estándar, así que son **dos
+upgrades al año, agendados**. No es una emergencia, es una rutina — y como rutina
+tiene que estar guionada.
+
+- **Preparación, que es el 80% del trabajo:** revisar APIs deprecadas
+  (`kubectl-convert`, `pluto`), matriz de compatibilidad de add-ons, PDBs puestos,
+  y probarlo en dev primero. Nunca en prod primero, nunca sin haberlo hecho antes.
+- **In-place:** control plane → node group → add-ons, en ese orden estricto. AWS
+  documenta que [ambos planos deben terminar en la misma minor](https://docs.aws.amazon.com/eks/latest/best-practices/cluster-upgrades.html)
+  y que el control plane necesita [hasta 5 IPs libres](https://docs.aws.amazon.com/eks/latest/userguide/update-cluster.html)
+  en las subnets — detalle que rompe upgrades en VPCs apretadas.
+- **Blue/green:** cluster nuevo en la versión nueva, tráfico migrado gradualmente,
+  rollback = apuntar el DNS al viejo. [AWS lo documenta como estrategia](https://aws.amazon.com/blogs/containers/kubernetes-cluster-upgrade-the-blue-green-deployment-strategy/).
+  Es lo que se usa cuando el riesgo no es negociable, y solo es viable si ya tienes
+  el lab 09 (sin IaC no puedes clonar un cluster).
+- **La decisión:** in-place es más barato y suficiente para la mayoría. Blue/green
+  cuesta el doble mientras dura y es el único con rollback real. El lab hace los
+  dos para que la decisión sea informada, no por defecto.
+- **Rollback:** el control plane de EKS **no se puede bajar de versión**. Esa
+  asimetría es la razón de existir de blue/green y hay que tenerla clara antes,
+  no durante.
+
+**~2h 30m.**
+
+### 11 · Guardrails — políticas, seguridad y compliance
+
+**Pregunta:** ¿cómo evitamos que un despliegue mal hecho llegue al cluster?
+
+En un equipo grande no puedes revisar cada manifest a mano. Las reglas se
+codifican y el cluster las rechaza solo.
+
+- **Kyverno** como admission controller. Graduó en CNCF en
+  [marzo 2026](https://www.cncf.io/announcements/2026/03/24/cloud-native-computing-foundation-announces-kyvernos-graduation/)
+  y sus políticas son YAML de Kubernetes, no Rego — por eso lo prefiero sobre OPA
+  Gatekeeper para empezar. Además de validar, puede **mutar** y **generar**
+  recursos, que es lo que lo hace útil de verdad.
+- Políticas que se sienten en el día a día:
+  - rechazar imágenes con tag `:latest` o de registries no aprobados
+  - exigir `requests`/`limits` en todo contenedor
+  - prohibir `privileged`, `hostNetwork` y `runAsRoot`
+  - **generar** automáticamente una NetworkPolicy default-deny en cada namespace nuevo
+  - **mutar** para inyectar labels de ownership que no venían
+- **Modo `Audit` antes de `Enforce`.** El error clásico es activar enforce de golpe
+  y romper todos los despliegues del equipo. Se mide primero, se comunica, se
+  aplica después.
+- Alrededor: Pod Security Standards, cifrado de secrets con KMS, escaneo de
+  imágenes en ECR, y audit logs del control plane a donde se puedan consultar.
+- **La parte incómoda:** una política que rompe un deploy legítimo. Cómo se
+  diagnostica (`PolicyReport`), cómo se excepciona con criterio, y por qué las
+  excepciones también van en Git.
+
+**~2h.**
+
+### 12 · Observabilidad y SLOs
+
+**Pregunta:** ¿cómo sabemos que algo está mal antes de que nos escriba un usuario?
+
+- **Los tres pilares, con las opciones reales:**
+
+  | Necesidad         | AWS nativo                                                               | Alternativa                                 |
+  | ----------------- | ------------------------------------------------------------------------ | ------------------------------------------- |
+  | Métricas de infra | CloudWatch Container Insights (add-on `amazon-cloudwatch-observability`) | Amazon Managed Prometheus + Managed Grafana |
+  | Logs              | Fluent Bit → CloudWatch Logs                                             | Loki, o un SaaS                             |
+  | Traces            | ADOT (AWS Distro for OpenTelemetry) → X-Ray                              | Cualquier backend OTLP                      |
+
+  AWS es explícito en que Container Insights alcanza si CloudWatch es tu
+  herramienta principal, y que [Managed Prometheus da más flexibilidad](https://docs.aws.amazon.com/prescriptive-guidance/latest/implementing-logging-monitoring-cloudwatch/prometheus-monitoring-eks.html)
+  para consultar y retener métricas. El lab monta las dos rutas para que veas la
+  diferencia en costo y en capacidad de consulta.
+
+- **Control plane logs** encendidos (audit, authenticator) — y la conversación de
+  cuánto cuestan, porque es real.
+- **Instrumentar con OpenTelemetry**, no con el SDK de un vendor. Es la decisión
+  que te deja cambiar de backend después sin reescribir la app.
+- **La parte que casi nadie hace: SLOs.** Definir un SLI (por ejemplo,
+  disponibilidad medida en el LB), un objetivo (99.9%), y alertar sobre
+  **agotamiento de error budget**, no sobre "CPU al 80%". Alertar por síntomas del
+  servicio y no por síntomas del nodo es la diferencia entre un on-call sostenible
+  y uno que quema gente.
+- **Cierre honesto:** apagarlo todo al terminar. La observabilidad es el costo
+  recurrente que más sorprende en la primera factura.
+
+**~2h 30m.**
+
+### 13 · Costo y eficiencia — FinOps sobre Kubernetes
+
+**Pregunta:** la factura llegó y nadie sabe qué la subió. ¿de quién es cada dólar?
+
+En muchas organizaciones el costo es el motivo por el que llaman al equipo de
+plataforma, no la disponibilidad. Y Kubernetes lo hace opaco a propósito: un
+cluster es una factura de EC2 sin desglose por equipo.
+
+- **Atribuir el gasto:** OpenCost o Kubecost para ver costo por namespace, por
+  deployment y por equipo. Sin esto, "optimizar" es adivinar. El primer hallazgo
+  típico es incómodo: un solo namespace se lleva la mitad de la factura.
+- **Right-sizing con datos:** el patrón más caro de Kubernetes es pedir `requests`
+  de 2 CPU para usar 0.1. Usar las recomendaciones del VPA en modo `Off` (solo
+  recomienda, no aplica) para ajustar con evidencia en vez de con intuición.
+- **Spot con Karpenter:** hasta 90% de descuento a cambio de interrupciones con 2
+  minutos de aviso. Qué workloads lo toleran (stateless con réplicas), cuáles no, y
+  cómo se mezcla con On-Demand en un mismo NodePool. Comprobar que la app sobrevive
+  una interrupción, no asumirlo.
+- **Consolidación y `ttlSecondsAfterEmpty`:** el ahorro que no requiere negociar con
+  nadie, solo configurar bien Karpenter.
+- **Compromisos:** Savings Plans y Reserved Instances para la base estable. Va
+  después de right-sizing, nunca antes — comprometerte con capacidad
+  sobredimensionada es pagar el error por tres años.
+- **Tags obligatorios por política.** Sin tags no hay atribución, así que la regla
+  de Kyverno del lab 11 que inyecta labels de ownership cierra el círculo aquí.
+- **Lo que ya sabes de los labs 1-3 aplicado:** el NAT Gateway olvidado, el LB
+  huérfano, el volumen EBS sin adjuntar. `scripts/verify-clean.sh` es la versión
+  chiquita de esto mismo.
+
+**~2h.**
+
+---
+
+## Vacíos conscientes
+
+Después de los 13 labs quedan temas sin cubrir. No son olvidos, son decisiones —
+o porque no caben en una cuenta personal, o porque el retorno no justifica el
+tiempo. Vale tenerlos identificados para no confundir "no lo practiqué" con "no
+existe".
+
+| Tema                                                                  | Por qué queda fuera                                                                                                | Qué hacer                                                                                                        |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| **Multi-account / landing zone** (Organizations, SCPs, Control Tower) | Requiere varias cuentas AWS y presupuesto. No se puede simular con una                                             | Leerlo. Es la primera cosa que te va a tocar en una empresa y conviene reconocer el vocabulario                  |
+| **Multi-región activo-activo**                                        | El costo se duplica y el problema real es el estado (Aurora Global, DynamoDB Global Tables), no el cómputo         | Conceptual. Entender que EKS es regional y "global" son varios clusters con DNS al frente                        |
+| **Service mesh** (Istio, Linkerd)                                     | Complejidad alta y solo se justifica a cierta escala. Un mesh mal operado causa más incidentes de los que previene | Saber qué problema resuelve (mTLS, tráfico fino, telemetría) y que el lab 07 + 09 cubren el 80% con menos piezas |
+| **Runtime security** (GuardDuty EKS Protection, Falco)                | Se solapa con el lab 11 y encender GuardDuty en una cuenta de lab cuesta                                           | Fold-in opcional del lab 11                                                                                      |
+| **Windows nodes, GPU, ML**                                            | Nicho. GPU además es caro por hora                                                                                 | Solo si tu trabajo lo pide                                                                                       |
+| **Chaos engineering / game days**                                     | Necesita un sistema con SLOs ya definidos para que signifique algo                                                 | Cierre opcional del lab 08, después del 12                                                                       |
+| **Compliance formal** (CIS Benchmark, PCI, SOC2)                      | Es un ejercicio de auditoría, no de ingeniería                                                                     | Fold-in del lab 11                                                                                               |
+| **Secrets externos** (External Secrets Operator, Secrets Manager CSI) | Cabe en el lab 05 como extensión natural de Pod Identity                                                           | Fold-in del lab 05                                                                                               |
+| **Backstage / portal interno**                                        | Es producto, no infraestructura. Solo tiene sentido con varios equipos consumiendo                                 | Leerlo si te toca plataforma                                                                                     |
+| **etcd, kubeadm, control plane**                                      | En EKS es managed, no tienes acceso                                                                                | Se practica en kind. Ver [puente con CKA](#puente-con-los-labs-de-cka)                                           |
+
+Si más adelante uno de estos se vuelve relevante para tu trabajo, cabe como lab
+nuevo en su nivel sin romper la estructura: el nivel 1 admite fundamentos, el 2
+operación, el 3 proceso y gobierno.
+
+---
+
+## Alcance y límites: esto es un lab, no producción
+
+Importa decirlo explícito. Los labs enseñan **la mecánica** de EKS, y esa parte es
+correcta y transferible. Pero **la forma en que la ejecutan no es cómo se opera un
+ambiente productivo**, y la diferencia principal no es técnica, es de proceso.
+
+| En el lab hacemos...                      | En producción sería...                                                                                                                                                                            | Por qué el lab lo hace así                                                                      |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Clic en la consola para IAM, VPC, cluster | Terraform/CDK en Git, aplicado por pipeline. Nadie tiene escritura en la consola de prod                                                                                                          | Para que veas los campos y entiendas qué configura cada uno. Un módulo de Terraform los esconde |
+| `kubectl create deployment`               | GitOps: Argo CD o Flux sincronizan desde un repo. Un cambio es un PR                                                                                                                              | Los comandos imperativos son lo que necesitas para el CKA                                       |
+| Una sola cuenta AWS                       | Organizations con cuenta por ambiente, SCPs, Control Tower                                                                                                                                        | Simplicidad y costo                                                                             |
+| Endpoint del API público                  | Privado, con acceso por VPN, bastión o SSM                                                                                                                                                        | Para poder usar `kubectl` desde tu casa sin montar red                                          |
+| Un cluster                                | Mínimo uno por ambiente. Y la decisión "uno grande vs varios" es un [trade-off documentado](https://docs.aws.amazon.com/en_us/eks/latest/best-practices/scalability.html), no una respuesta única | Costo                                                                                           |
+| Sin políticas de admisión                 | Kyverno/OPA, Pod Security Standards, NetworkPolicy default-deny                                                                                                                                   | Lab 11                                                                                          |
+| Observabilidad apagada para ahorrar       | Encendida antes que la app, con SLOs y alertas                                                                                                                                                    | Lab 12                                                                                          |
+| Sin backup                                | Velero, y probado con un restore real                                                                                                                                                             | Lab 06                                                                                          |
+| Secrets en claro en etcd                  | Cifrado de sobre con KMS                                                                                                                                                                          | Un paso más de setup                                                                            |
+| Todo se ve con todo dentro del cluster    | NetworkPolicy default-deny, ResourceQuota y RBAC por equipo                                                                                                                                       | Lab 07                                                                                          |
+| Imagen pública de Docker Hub, HTTP plano  | Imagen propia en ECR con tag inmutable, HTTPS con ACM                                                                                                                                             | Lab 04                                                                                          |
+| Nadie sabe cuánto cuesta cada equipo      | Atribución con OpenCost, tags obligatorios, right-sizing con datos                                                                                                                                | Lab 13                                                                                          |
+| Destruir todo al terminar                 | El cluster vive años y se le hacen upgrades                                                                                                                                                       | Es un lab                                                                                       |
+
+**No conviertas los labs 1-3 en labs de producción.** Si el lab 1 fuera Terraform +
+GitOps no aprenderías qué es un Fargate profile, aprenderías a copiar un módulo.
+El orden correcto es: entender la mecánica a mano (nivel 1), operarla (nivel 2),
+y después automatizarla y gobernarla (nivel 3).
+
+### Qué cambia cuando el equipo es internacional
+
+Con una persona, el conocimiento puede vivir en su cabeza. Con un equipo repartido
+en husos horarios, todo lo que no esté escrito se convierte en un bloqueo de 12 horas:
+
+- **El estado deseado en Git, siempre.** No es purismo. Es que alguien en otro
+  huso pueda ver qué está desplegado sin despertar a nadie.
+- **Runbooks para lo repetitivo** — el upgrade, el rollback, el escalado de
+  emergencia. Escritos antes de necesitarlos.
+- **ADRs (Architecture Decision Records)** para el "¿por qué está así?". Sin esto,
+  cada rotación de personal repite las mismas discusiones.
+- **Ownership explícito por namespace o servicio**, en labels y en el repo.
+- **On-call con handoff documentado** y alertas que apuntan a un servicio con
+  dueño, no a un nodo.
+- **Cero conocimiento tribal en el camino crítico.** Si el deploy necesita que
+  alguien "corra el script que tiene en su máquina", el sistema no es operable.
+
+Los labs 09 a 13 existen justamente para eso: no agregan features, agregan la
+capacidad de que varias personas operen lo mismo sin pisarse.
+
+### Lectura paralela
+
+AWS mantiene el [EKS Best Practices Guide](https://docs.aws.amazon.com/eks/latest/best-practices/),
+con secciones de seguridad, confiabilidad, escalabilidad, costo y upgrades. Es el
+estándar de facto. No hay que memorizarlo — hay que saber qué existe ahí y volver
+cuando toque tomar una decisión.
 
 ## Puente con los labs de CKA
 
