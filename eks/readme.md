@@ -15,12 +15,12 @@ el cómputo y qué tienes que instalar tú**.
 
 ## Nivel 1 · Fundamentos — orden propuesto
 
-| #   | Lab                                     | Qué aprendes                                                            | Por qué va en esta posición                                                                                          |
-| --- | --------------------------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| 1   | [`eks-fargate-lab`](eks-fargate-lab/)   | Fargate profiles, IRSA + OIDC, AWS Load Balancer Controller con Helm    | Es el que más piezas te obliga a montar a mano. Aquí ves _por qué_ existe cada componente                            |
-| 2   | [`eks-ec2-lab`](eks-ec2-lab/)           | Managed Node Groups, kube-proxy, cloud-controller-manager, AMIs, sizing | Después de pelear con Fargate, aprecias que un `Service` tipo LoadBalancer funcione sin instalar nada                |
-| 3   | [`eks-automode-lab`](eks-automode-lab/) | Auto Mode, NodePools, Karpenter, controllers integrados                 | Cierra la ruta: AWS te quita de encima todo lo de los labs 1 y 2. Solo entiendes el valor si antes lo hiciste a mano |
-| 4   | `eks-ingress-lab` 📋                    | Ingress + ALB, HTTPS con ACM, imagen propia en ECR                      | Los tres primeros paran en NLB capa 4 con una imagen pública. Esto es cómo se expone una app de verdad               |
+| #   | Lab                                        | Qué aprendes                                                            | Por qué va en esta posición                                                                                          |
+| --- | ------------------------------------------ | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| 1   | [`eks-fargate-lab`](01-eks-fargate-lab/)   | Fargate profiles, IRSA + OIDC, AWS Load Balancer Controller con Helm    | Es el que más piezas te obliga a montar a mano. Aquí ves _por qué_ existe cada componente                            |
+| 2   | [`eks-ec2-lab`](02-eks-ec2-lab/)           | Managed Node Groups, kube-proxy, cloud-controller-manager, AMIs, sizing | Después de pelear con Fargate, aprecias que un `Service` tipo LoadBalancer funcione sin instalar nada                |
+| 3   | [`eks-automode-lab`](03-eks-automode-lab/) | Auto Mode, NodePools, Karpenter, controllers integrados                 | Cierra la ruta: AWS te quita de encima todo lo de los labs 1 y 2. Solo entiendes el valor si antes lo hiciste a mano |
+| 4   | [`ingress-lab`](04-ingress-lab/)           | Ingress + ALB, HTTPS con ACM, imagen propia en ECR                      | Los tres primeros paran en NLB capa 4 con una imagen pública. Esto es cómo se expone una app de verdad               |
 
 La lógica de los primeros tres es **fricción decreciente**: empiezas donde tienes
 que ensamblar todo y terminas donde no ensamblas nada. Los READMEs se referencian
@@ -585,10 +585,8 @@ capacidad de que varias personas operen lo mismo sin pisarse.
 
 ### Lectura paralela
 
-AWS mantiene el [EKS Best Practices Guide](https://docs.aws.amazon.com/eks/latest/best-practices/),
-con secciones de seguridad, confiabilidad, escalabilidad, costo y upgrades. Es el
-estándar de facto. No hay que memorizarlo — hay que saber qué existe ahí y volver
-cuando toque tomar una decisión.
+- [EKS Best Practices Guide](https://docs.aws.amazon.com/eks/latest/best-practices/) — seguridad, confiabilidad, escalabilidad, costo y upgrades. El estándar de facto.
+- [`references/eks-vs-ecs.md`](references/eks-vs-ecs.md) — cuándo usar EKS y cuándo usar ECS. El argumento completo para sustentar la decisión.
 
 ## Puente con los labs de CKA
 
