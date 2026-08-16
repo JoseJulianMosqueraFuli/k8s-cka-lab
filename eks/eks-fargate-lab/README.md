@@ -1,12 +1,14 @@
 # Lab Manual: EKS + Fargate en Virginia (us-east-1)
 
 ## Resumen
+
 Cluster EKS con Fargate, desplegar nginx público con AWS Load Balancer Controller.
 Todo desde la consola de AWS + CLI.
 
 **Costo estimado:** ~$0.15/hr (EKS $0.10 + NAT $0.045 + Fargate pods ~$0.01)
 
 **Herramientas necesarias en tu PC:**
+
 - AWS CLI v2
 - kubectl
 - eksctl
@@ -19,10 +21,12 @@ Todo desde la consola de AWS + CLI.
 IAM → Roles → Create role
 
 ### Rol 1: Cluster EKS
+
 El cluster necesita un rol para gestionar recursos en AWS (crear ENIs, hablar con EC2, etc.)
 
 1. Trusted entity type: **Custom trust policy**
 2. Pegar:
+
 ```json
 {
   "Version": "2012-10-17",
@@ -37,14 +41,17 @@ El cluster necesita un rol para gestionar recursos en AWS (crear ENIs, hablar co
   ]
 }
 ```
+
 3. Next → buscar y marcar **AmazonEKSClusterPolicy** → Next
 4. Role name: `eks-lab-cluster-role` → Create role
 
 ### Rol 2: Fargate
+
 Fargate necesita un rol para ejecutar pods (descargar imágenes, escribir logs, etc.)
 
 1. Trusted entity type: **Custom trust policy**
 2. Pegar:
+
 ```json
 {
   "Version": "2012-10-17",
@@ -59,6 +66,7 @@ Fargate necesita un rol para ejecutar pods (descargar imágenes, escribir logs, 
   ]
 }
 ```
+
 3. Next → buscar y marcar **AmazonEKSFargatePodExecutionRolePolicy** → Next
 4. Role name: `eks-lab-fargate-role` → Create role
 
@@ -158,12 +166,14 @@ Sin profile, los pods se quedan en Pending para siempre.
 EKS → lab-cluster → Compute → Fargate Profiles → Add
 
 ### Profile 1: fp-system
+
 - Nombre: `fp-system`
 - Pod execution role: `eks-lab-fargate-role`
 - Subnets: solo las 2 **privadas**
 - Pod selectors → Namespace: `kube-system`
 
 ### Profile 2: fp-apps
+
 - Nombre: `fp-apps`
 - Pod execution role: `eks-lab-fargate-role`
 - Subnets: solo las 2 **privadas**
@@ -182,11 +192,13 @@ aws eks update-kubeconfig --name lab-cluster --region us-east-1
 ```
 
 Verificar:
+
 ```bash
 kubectl get pods -n kube-system
 ```
 
 ### Si CoreDNS está en Pending:
+
 En versiones viejas de EKS, CoreDNS tiene una anotación que lo obliga a correr en EC2.
 Hay que quitarla:
 
@@ -209,6 +221,7 @@ kubectl create deployment nginx --image=nginx:alpine --replicas=2 -n apps
 ```
 
 Esperar ~30-60 seg (cold start de Fargate):
+
 ```bash
 kubectl get pods -n apps -w
 ```
@@ -241,6 +254,7 @@ un "OIDC issuer" — una URL única que identifica al cluster.
 por defecto.
 
 **La solución (IRSA - IAM Roles for Service Accounts):**
+
 1. El pod tiene un ServiceAccount de Kubernetes
 2. Kubernetes le genera un token JWT (como un "carnet de identidad")
 3. El pod presenta ese token a AWS diciendo "soy el ServiceAccount X del cluster Y"
@@ -270,6 +284,7 @@ nadie la acepta.
 ```
 
 **¿Para qué más sirve OIDC?** Para CUALQUIER pod que necesite permisos AWS:
+
 - External DNS → modificar Route 53
 - Cert Manager → validar certificados
 - Apps que leen S3, escriben DynamoDB, publican en SNS/SQS
@@ -285,6 +300,7 @@ nadie la acepta.
 Esto crea un Identity Provider en IAM (visible en IAM → Identity Providers).
 
 ### 8.2: Descargar la policy de IAM
+
 Contiene todos los permisos que el controller necesita (crear LBs, Target Groups, etc.)
 
 **IMPORTANTE:** Usar la policy de la rama `main`, no de una versión vieja.
@@ -295,6 +311,7 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/kubernetes-sigs/aws-lo
 ```
 
 Verificar que se descargó bien:
+
 ```powershell
 Select-String "DescribeRouteTables" iam_policy.json
 # Debe mostrar una línea. Si no muestra nada, la descarga falló.
@@ -320,6 +337,7 @@ eksctl create iamserviceaccount --cluster=lab-cluster --namespace=kube-system --
 #### ¿Qué hace este comando por debajo?
 
 Crea un stack de CloudFormation que contiene:
+
 1. Un **IAM Role** con la policy del LB Controller
 2. Una **trust policy** que dice "solo el ServiceAccount `aws-load-balancer-controller` del cluster `lab-cluster` puede asumir este rol"
 3. Un **ServiceAccount en Kubernetes** anotado con el ARN del rol
@@ -354,11 +372,13 @@ helm install aws-load-balancer-controller eks/aws-load-balancer-controller --set
 ```
 
 **Reemplaza `<TU_VPC_ID>`** con tu VPC ID real. Lo puedes obtener con:
+
 ```bash
 aws ec2 describe-vpcs --filters "Name=tag:Name,Values=*lab*" --query "Vpcs[0].VpcId" --output text --region us-east-1
 ```
 
 **Si te equivocaste en el VPC ID**, no necesitas desinstalar. Corrige con `helm upgrade`:
+
 ```bash
 helm upgrade aws-load-balancer-controller eks/aws-load-balancer-controller --set clusterName=lab-cluster --set serviceAccount.create=false --set region=us-east-1 --set vpcId=vpc-CORRECTO --set serviceAccount.name=aws-load-balancer-controller -n kube-system
 ```
@@ -378,6 +398,7 @@ Crear un Service tipo LoadBalancer con las anotaciones para que el AWS LB Contro
 cree un NLB con target type IP (apuntando directo a los pods Fargate):
 
 Archivo `nginx-service.yaml`:
+
 ```yaml
 apiVersion: v1
 kind: Service
@@ -404,15 +425,16 @@ kubectl apply -f nginx-service.yaml
 
 #### ¿Qué hace cada anotación?
 
-| Anotación | Valor | Significado |
-|-----------|-------|-------------|
-| `aws-load-balancer-type` | `nlb` | Usa Network Load Balancer (capa 4, más rápido y barato que ALB) |
-| `aws-load-balancer-nlb-target-type` | `ip` | Registra IPs de pods directamente como targets (obligatorio en Fargate) |
-| `aws-load-balancer-scheme` | `internet-facing` | El LB es público (accesible desde internet) |
+| Anotación                           | Valor             | Significado                                                             |
+| ----------------------------------- | ----------------- | ----------------------------------------------------------------------- |
+| `aws-load-balancer-type`            | `nlb`             | Usa Network Load Balancer (capa 4, más rápido y barato que ALB)         |
+| `aws-load-balancer-nlb-target-type` | `ip`              | Registra IPs de pods directamente como targets (obligatorio en Fargate) |
+| `aws-load-balancer-scheme`          | `internet-facing` | El LB es público (accesible desde internet)                             |
 
 Sin la anotación `target-type: ip`, intentaría usar `instance` y fallaría porque Fargate no tiene instancias EC2.
 
 Esperar ~2-3 min:
+
 ```bash
 kubectl get svc nginx -n apps
 # EXTERNAL-IP muestra la URL del NLB
@@ -425,37 +447,40 @@ Abrir en el navegador → página de bienvenida de NGINX.
 ## Conceptos clave
 
 ### Deployment vs Service vs Pod
+
 - **Pod:** contenedor(es) corriendo. La unidad mínima.
 - **Deployment:** controlador que mantiene N pods corriendo. Si uno muere, crea otro.
 - **Service:** dirección estable que apunta a los pods. Sin esto, nadie puede llegar a ellos.
 
 ### Namespace
+
 Carpeta lógica dentro del cluster. Sirve para organizar y aislar recursos.
 El Fargate Profile matchea por namespace — si no hay profile para un namespace,
 los pods quedan en Pending.
 
 ### Analogía con ECS
-| ECS | Kubernetes |
-|-----|-----------|
-| Task Definition | Pod spec |
-| Service | Deployment |
-| Target Group | Service (ClusterIP) |
-| ALB/NLB | Service (LoadBalancer) |
+
+| ECS             | Kubernetes             |
+| --------------- | ---------------------- |
+| Task Definition | Pod spec               |
+| Service         | Deployment             |
+| Target Group    | Service (ClusterIP)    |
+| ALB/NLB         | Service (LoadBalancer) |
 
 ---
 
 ## Errores encontrados y soluciones
 
-| Error | Causa | Solución |
-|-------|-------|----------|
-| "the server has asked for the client to provide credentials" | El usuario de CLI no tiene acceso al cluster | Crear Access Entry en EKS → Access |
-| "namespaces is forbidden" | Tienes `AmazonEKSAdminPolicy` en vez de `AmazonEKSClusterAdminPolicy` | Cambiar la policy en Access Entry |
-| CoreDNS en Pending | Anotación `compute-type: ec2` | `kubectl rollout restart deployment coredns -n kube-system` |
-| Service crea Classic LB que no funciona | Sin AWS LB Controller, Kubernetes crea CLB con target type instance | Instalar AWS Load Balancer Controller |
-| LB Controller error "DescribeRouteTables 403" | Policy de IAM descargada de versión vieja (v2.11.0) | Usar policy de rama `main` que incluye `ec2:DescribeRouteTables` |
-| "MalformedPolicyDocument: Syntax errors in policy" | Falta `file://` en `--policy-document` | Usar `file://iam_policy.json` |
-| `curl` no descarga bien en PowerShell | Conflicto con alias de curl en PS | Usar `Invoke-WebRequest -OutFile` en vez de `curl -o` |
-| `helm install` con VPC ID incorrecto | No reemplazaste `<TU_VPC_ID>` | Corregir con `helm upgrade` (no necesitas desinstalar) |
+| Error                                                        | Causa                                                                 | Solución                                                         |
+| ------------------------------------------------------------ | --------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| "the server has asked for the client to provide credentials" | El usuario de CLI no tiene acceso al cluster                          | Crear Access Entry en EKS → Access                               |
+| "namespaces is forbidden"                                    | Tienes `AmazonEKSAdminPolicy` en vez de `AmazonEKSClusterAdminPolicy` | Cambiar la policy en Access Entry                                |
+| CoreDNS en Pending                                           | Anotación `compute-type: ec2`                                         | `kubectl rollout restart deployment coredns -n kube-system`      |
+| Service crea Classic LB que no funciona                      | Sin AWS LB Controller, Kubernetes crea CLB con target type instance   | Instalar AWS Load Balancer Controller                            |
+| LB Controller error "DescribeRouteTables 403"                | Policy de IAM descargada de versión vieja (v2.11.0)                   | Usar policy de rama `main` que incluye `ec2:DescribeRouteTables` |
+| "MalformedPolicyDocument: Syntax errors in policy"           | Falta `file://` en `--policy-document`                                | Usar `file://iam_policy.json`                                    |
+| `curl` no descarga bien en PowerShell                        | Conflicto con alias de curl en PS                                     | Usar `Invoke-WebRequest -OutFile` en vez de `curl -o`            |
+| `helm install` con VPC ID incorrecto                         | No reemplazaste `<TU_VPC_ID>`                                         | Corregir con `helm upgrade` (no necesitas desinstalar)           |
 
 ---
 
@@ -474,6 +499,72 @@ Elimina en orden: Service → LB Controller → IAM Service Account → IAM Poli
 Fargate Profiles → Cluster → NAT Gateway → Elastic IP → IAM Roles → OIDC Provider.
 
 Solo queda borrar la VPC desde la consola al final (Actions → Delete VPC).
+
+---
+
+## Verificaciones post-deploy
+
+Comandos útiles para explorar y validar que todo funciona correctamente.
+
+### Infraestructura
+
+```bash
+# Nodos virtuales de Fargate (uno por pod)
+kubectl get nodes
+
+# Ver detalles de un nodo Fargate (CPU, memoria asignada)
+kubectl describe node <nombre-de-un-nodo>
+
+# Ver los Target Groups del NLB
+aws elbv2 describe-target-groups --region us-east-1
+
+# Ver los targets registrados (IPs de los pods)
+aws elbv2 describe-target-health --target-group-arn <arn-del-target-group> --region us-east-1
+```
+
+### Resiliencia
+
+```bash
+# Borrar un pod y ver cómo Kubernetes lo recrea automáticamente
+kubectl delete pod -n apps $(kubectl get pods -n apps -o jsonpath='{.items[0].metadata.name}')
+kubectl get pods -n apps -w
+# El Deployment detecta que falta un pod y crea uno nuevo (~35 seg en Fargate)
+```
+
+### Escalado
+
+```bash
+# Subir a 4 réplicas
+kubectl scale deployment nginx -n apps --replicas=4
+kubectl get pods -n apps -w
+# Fargate provisiona nodos virtuales para cada nuevo pod
+```
+
+### Logs
+
+```bash
+# Logs de nginx (tráfico HTTP)
+kubectl logs -n apps -l app=nginx
+
+# Logs del LB Controller (creación de NLB, registro de targets)
+kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --tail=20
+```
+
+### Qué se ve en los logs del LB Controller
+
+El controller muestra en tiempo real cómo gestiona los targets:
+
+- `registering targets` — cuando se crean pods nuevos, los registra en el Target Group
+- `deRegistering targets` — cuando se borran pods, los quita del Target Group
+- `Successful reconcile` — confirmación de que el estado real coincide con el deseado
+- `setting service loadBalancerClass` — cuando detecta el Service con las anotaciones NLB
+
+### En la consola de AWS
+
+- **EC2 → Load Balancers** → tu NLB con el DNS público
+- **EC2 → Target Groups** → targets con las IPs privadas de los pods
+- **IAM → Identity Providers** → el OIDC Provider del cluster
+- **IAM → Roles** → `eks-lab-lb-controller-role` con la trust policy OIDC
 
 ---
 
