@@ -19,7 +19,14 @@ producción.
 - Docker (para construir la imagen)
 - AWS CLI v2
 - kubectl
-- El AWS Load Balancer Controller ya instalado (lab 01) o integrado (lab 03)
+- Go 1.22+ (para `go mod tidy`; o puedes saltar este paso y dejar que Docker baje las dependencias)
+- El AWS Load Balancer Controller ya instalado (lab 01, paso 8) o integrado (lab 03 Auto Mode)
+
+> **Importante:** si vienes del lab 02 (EC2), tu cluster **no** tiene el AWS LB
+> Controller instalado — el lab 02 solo usa el cloud-controller-manager que crea
+> Classic LBs. Para que el Ingress funcione, necesitas instalar el AWS LB Controller
+> siguiendo el paso 8 del lab 01 (OIDC → IAM policy → eksctl iamserviceaccount → Helm).
+> Si vienes del lab 03 (Auto Mode), ya viene integrado y no necesitas hacer nada.
 
 **Conexión CKA:** `domains/03-services-networking` — Ingress, Services, DNS (20% del examen)
 
@@ -180,9 +187,9 @@ module identity-api
 go 1.22
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.32.0
-	github.com/aws/aws-sdk-go-v2/config v1.28.0
-	github.com/aws/aws-sdk-go-v2/service/sts v1.33.0
+	github.com/aws/aws-sdk-go-v2 v1.30.0
+	github.com/aws/aws-sdk-go-v2/config v1.27.0
+	github.com/aws/aws-sdk-go-v2/service/sts v1.30.0
 )
 ```
 
@@ -191,6 +198,14 @@ Después de crear `go.mod`, corre:
 ```bash
 cd app && go mod tidy
 ```
+
+> **Si no tienes Go instalado:** no pasa nada. El `go mod tidy` genera el archivo
+> `go.sum` con los hashes exactos de las dependencias. Pero el Dockerfile usa
+> `go mod download` dentro del build, así que Docker descarga las dependencias por
+> ti. Lo único es que las versiones en `go.mod` deben existir realmente. Si el
+> build falla con "module not found", corre `go mod tidy` para que resuelva las
+> versiones más recientes, o cambia a `github.com/aws/aws-sdk-go-v2 latest` y deja
+> que tidy las fije.
 
 ### ¿Por qué `/identity` devuelve 200 siempre?
 
@@ -242,6 +257,11 @@ docker push $IMAGE
 
 echo "Imagen: $IMAGE"
 ```
+
+> **Nota sobre tag immutability:** si tu tag es `"local"` (porque no estás en un
+> repo git), solo podrás hacer push una vez. En un segundo intento, ECR lo rechaza
+> porque el tag ya existe y es inmutable. Solución: usa un timestamp como fallback:
+> `GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || date +%s)`
 
 ### ¿Por qué el SHA del commit como tag?
 
@@ -428,6 +448,11 @@ spec:
                 port:
                   number: 80
 ```
+
+> **Nota de seguridad:** en producción no expondrías `/healthz` a internet — es
+> información interna. El ALB health check funciona sin exponer el path
+> públicamente (usa el health check configurado en la anotación contra los pods
+> directamente). Aquí lo exponemos para poder verificar con `curl` desde afuera.
 
 ```bash
 kubectl apply -f manifests/ingress.yaml
