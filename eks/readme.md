@@ -2,8 +2,12 @@
 
 Ruta de práctica para entender EKS por capas, en tres niveles: **fundamentos**
 (levantar un cluster), **operación** (mantenerlo vivo) y **producción** (operarlo
-en equipo sin tocarlo a mano). Los tres primeros labs están hechos; del 04 al 10
-están diseñados en el [roadmap](#roadmap).
+en equipo sin tocarlo a mano). Los labs 01-03 están hechos y verificados; del 04
+al 13 están diseñados como guías completas en el [roadmap](#roadmap).
+
+> Los labs son **guías, no manifiestos**: los archivos (manifests, políticas,
+> Terraform, código Go) se escriben siguiendo los pasos del README. Los únicos
+> archivos que se entregan son los `destroy.sh`/`destroy.ps1` de cada lab.
 
 Cada lab de nivel 1 levanta un cluster desde la consola de AWS, despliega nginx
 expuesto a internet, y lo destruye. La diferencia entre ellos es **quién gestiona
@@ -111,7 +115,7 @@ Reglas prácticas:
 
 - **Labs 1, 2 y 3:** usa la más reciente en soporte estándar. Es lo que AWS
   recomienda para clusters nuevos.
-- **El lab de upgrade (roadmap 06):** crea el cluster una versión **atrás** a
+- **El lab de upgrade (roadmap 10):** crea el cluster una versión **atrás** a
   propósito. Si arrancas en la más nueva no tienes a dónde subir.
 - EKS solo permite subir de una minor en una minor. No se puede salvar 1.34 → 1.36
   en un paso.
@@ -133,6 +137,15 @@ control plane. Dos consecuencias:
 - No corras los tres labs en paralelo sin razón. Son 3 NAT = $0.135/hr solo en red.
 - Corre `scripts/verify-clean.sh` al terminar. Siempre.
 
+### VPC Gateway Endpoint para S3: gratis y baja el tráfico del NAT
+
+Al crear la VPC con el wizard, agrega el **Gateway Endpoint de S3** (tipo
+`com.amazonaws.region.s3`). No cobra por hora ni por GB — es una tabla de rutas,
+no un servicio de pago — y hace que el tráfico a ECR/S3 (jalar imágenes, push)
+salga por la ruta privada directa en vez de rebotar por el NAT. Es la forma más
+barata de quitarle carga al recurso más caro de la VPC. Lo retoma el lab 13 como
+fix de costo.
+
 ## Scripts
 
 ```
@@ -142,9 +155,13 @@ eks/
 │   └── verify-clean.sh        # auditoría post-destroy: ¿quedó algo cobrando?
 ├── proposals/
 │   └── 01-tagging-and-cleanup.md
-├── eks-fargate-lab/   destroy.ps1 · destroy.sh
-├── eks-ec2-lab/       destroy.ps1 · destroy.sh
-└── eks-automode-lab/  destroy.ps1 · destroy.sh
+├── references/
+│   └── eks-vs-ecs.md
+├── 01-eks-fargate-lab/   destroy.ps1 · destroy.sh
+├── 02-eks-ec2-lab/       destroy.ps1 · destroy.sh
+├── 03-eks-automode-lab/  destroy.ps1 · destroy.sh
+└── 04-ingress-lab/ … 13-finops-lab/
+    (cada lab del 04 al 13 trae su propio destroy.ps1 · destroy.sh)
 ```
 
 Los `.ps1` son los originales (PowerShell). Los `.sh` son la versión para
@@ -193,11 +210,11 @@ costo por hora de lo que encuentre para que sepas si urge.
 Los labs se organizan en tres niveles. Cada uno responde una pregunta distinta, y
 el salto entre niveles importa más que los labs individuales.
 
-| Nivel                     | Labs  | Pregunta                                      | Estado           |
-| ------------------------- | ----- | --------------------------------------------- | ---------------- |
-| **1 · Fundamentos**       | 01-04 | ¿cómo levanto un cluster y expongo una app?   | 01-03 ✅ · 04 📋 |
-| **2 · Operación (día 2)** | 05-08 | ¿cómo lo mantengo vivo?                       | 📋 diseñados     |
-| **3 · Producción**        | 09-13 | ¿cómo lo operamos varios, sin tocarlo a mano? | 📋 diseñados     |
+| Nivel                     | Labs  | Pregunta                                      | Estado                        |
+| ------------------------- | ----- | --------------------------------------------- | ----------------------------- |
+| **1 · Fundamentos**       | 01-04 | ¿cómo levanto un cluster y expongo una app?   | 01-03 ✅ · 04-13 📋 guías listas |
+| **2 · Operación (día 2)** | 05-08 | ¿cómo lo mantengo vivo?                       | 📋 guías listas                |
+| **3 · Producción**        | 09-13 | ¿cómo lo operamos varios, sin tocarlo a mano? | 📋 guías listas                |
 
 El nivel 3 es el que separa "sé usar EKS" de "sé operar EKS en producción con un
 equipo". No cambia la tecnología, cambia el proceso.
@@ -208,7 +225,7 @@ propósito está en [vacíos conscientes](#vacíos-conscientes).
 
 ---
 
-## Nivel 1 · lo que falta
+## Nivel 1 · Fundamentos — guías
 
 ### 04 · Exponer de verdad — Ingress, HTTPS y tu propia imagen
 
