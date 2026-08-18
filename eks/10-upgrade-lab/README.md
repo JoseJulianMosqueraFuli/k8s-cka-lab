@@ -29,8 +29,8 @@ y blue/green (caro, con rollback verdadero).
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  EKS Control Plane: SOLO PUEDE SUBIR de versión.       │
-│  1.29 → 1.30 ✓                                         │
-│  1.30 → 1.29 ✗ (IMPOSIBLE)                            │
+│  1.35 → 1.36 ✓                                         │
+│  1.36 → 1.35 ✗ (IMPOSIBLE)                            │
 │                                                         │
 │  Esta asimetría justifica toda la preparación.          │
 └─────────────────────────────────────────────────────────┘
@@ -53,7 +53,7 @@ curl -L https://github.com/FairwindsOps/pluto/releases/latest/download/pluto_lin
 sudo mv pluto /usr/local/bin/
 
 # Escanear el cluster
-pluto detect-all-in-cluster --target-versions k8s=v1.30
+pluto detect-all-in-cluster --target-versions k8s=v1.36
 ```
 
 Ejemplo de output:
@@ -88,7 +88,7 @@ kubectl convert -f old-ingress.yaml --output-version networking.k8s.io/v1
 ```bash
 CLUSTER_NAME=eks-ec2-lab
 REGION=us-east-1
-TARGET_VERSION="1.30"
+TARGET_VERSION="1.36"
 
 # Ver add-ons actuales y sus versiones
 aws eks list-addons --cluster-name $CLUSTER_NAME --region $REGION --output text
@@ -154,8 +154,8 @@ done
 ### El orden es estricto
 
 ```
-1. Control Plane (1.29 → 1.30)    ← ~20 min, no hay downtime del API server
-2. Node Groups (1.29 → 1.30)      ← rolling update, respeta PDBs
+1. Control Plane (1.35 → 1.36)    ← ~20 min, no hay downtime del API server
+2. Node Groups (1.35 → 1.36)      ← rolling update, respeta PDBs
 3. Add-ons (actualizar versiones)  ← puede requerir restart de pods
 ```
 
@@ -168,12 +168,12 @@ versión MAYOR que el control plane (n+1 nodes con n control plane está prohibi
 # Verificar versión actual
 aws eks describe-cluster --name $CLUSTER_NAME --region $REGION \
   --query "cluster.version" --output text
-# "1.29"
+# "1.35"
 
 # Iniciar upgrade
 aws eks update-cluster-version \
   --name $CLUSTER_NAME \
-  --kubernetes-version "1.30" \
+  --kubernetes-version "1.36" \
   --region $REGION
 
 # Esperar (~15-25 minutos)
@@ -183,7 +183,7 @@ echo "Control plane upgrade complete"
 # Verificar
 aws eks describe-cluster --name $CLUSTER_NAME --region $REGION \
   --query "cluster.version" --output text
-# "1.30"
+# "1.36"
 ```
 
 ### ¿Qué pasa durante el upgrade del control plane?
@@ -205,7 +205,7 @@ NODEGROUP=workers
 aws eks update-nodegroup-version \
   --cluster-name $CLUSTER_NAME \
   --nodegroup-name $NODEGROUP \
-  --kubernetes-version "1.30" \
+  --kubernetes-version "1.36" \
   --region $REGION
 
 # Esto hace un rolling update:
@@ -232,21 +232,21 @@ kubectl get pods -A -o wide | grep -v Running
 # CoreDNS
 aws eks update-addon --cluster-name $CLUSTER_NAME --addon-name coredns \
   --addon-version $(aws eks describe-addon-versions --addon-name coredns \
-    --kubernetes-version "1.30" --region $REGION \
+    --kubernetes-version "1.36" --region $REGION \
     --query "addons[0].addonVersions[0].addonVersion" --output text) \
   --resolve-conflicts OVERWRITE --region $REGION
 
 # kube-proxy
 aws eks update-addon --cluster-name $CLUSTER_NAME --addon-name kube-proxy \
   --addon-version $(aws eks describe-addon-versions --addon-name kube-proxy \
-    --kubernetes-version "1.30" --region $REGION \
+    --kubernetes-version "1.36" --region $REGION \
     --query "addons[0].addonVersions[0].addonVersion" --output text) \
   --resolve-conflicts OVERWRITE --region $REGION
 
 # VPC CNI
 aws eks update-addon --cluster-name $CLUSTER_NAME --addon-name vpc-cni \
   --addon-version $(aws eks describe-addon-versions --addon-name vpc-cni \
-    --kubernetes-version "1.30" --region $REGION \
+    --kubernetes-version "1.36" --region $REGION \
     --query "addons[0].addonVersions[0].addonVersion" --output text) \
   --resolve-conflicts OVERWRITE --region $REGION
 ```
@@ -276,8 +276,8 @@ ConfigMap de CoreDNS), este flag sobreescribe tus cambios. Alternativas:
 ### El flujo
 
 ```
-1. Cluster BLUE (1.29) — producción actual
-2. Crear Cluster GREEN (1.30) con misma IaC
+1. Cluster BLUE (1.35) — producción actual
+2. Crear Cluster GREEN (1.36) con misma IaC
 3. Desplegar apps en GREEN (Argo CD sync al nuevo cluster)
 4. Validar en GREEN (smoke tests, canary)
 5. Migrar tráfico: DNS/ALB → GREEN
@@ -295,7 +295,7 @@ variable "cluster_name" {
 }
 
 variable "cluster_version" {
-  default = "1.30"  # Nueva versión
+  default = "1.36"  # Nueva versión
 }
 ```
 
@@ -337,7 +337,7 @@ kubectl --context green apply -f gitops-repo/apps/
 
 ```bash
 # Simplemente apuntar tráfico de vuelta a BLUE
-# El cluster BLUE sigue intacto en 1.29
+# El cluster BLUE sigue intacto en 1.35
 
 # Si todo va bien después de 24-48h:
 cd infra/terraform/blue
@@ -409,7 +409,7 @@ Nodo A: [pod-1] [pod-2]     Nodo B: [pod-3] [pod-4]
    - Intenta evict pod-2 → PDB permite → evicted
    - Nodo A vacío → terminated
 
-2. Nuevo Nodo C (1.30) se une
+2. Nuevo Nodo C (1.36) se une
 3. Drain Nodo B: mismo proceso
 ```
 
@@ -472,7 +472,7 @@ kubectl delete pdb upgrade-test-pdb too-strict 2>/dev/null
 ## Lecciones aprendidas
 
 1. **El upgrade del control plane no se puede deshacer.** Una vez que EKS pasa
-   de 1.29 a 1.30, no hay vuelta atrás. Toda la preparación (APIs, add-ons,
+   de 1.35 a 1.36, no hay vuelta atrás. Toda la preparación (APIs, add-ons,
    PDBs, IPs) existe para evitar tener que "rollback" algo que no se puede
    rollback.
 

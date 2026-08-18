@@ -31,7 +31,7 @@ kind: ClusterConfig
 metadata:
   name: eks-troubleshoot-lab
   region: us-east-1
-  version: "1.30"
+  version: "1.36"
 
 managedNodeGroups:
   - name: workers
@@ -355,7 +355,7 @@ aws eks describe-addon --cluster-name eks-troubleshoot-lab \
 
 # 3. Ver compatibilidad
 aws eks describe-addon-versions --addon-name coredns \
-  --kubernetes-version 1.30 \
+  --kubernetes-version 1.36 \
   --query "addons[0].addonVersions[].addonVersion" --output text
 ```
 
@@ -364,7 +364,7 @@ aws eks describe-addon-versions --addon-name coredns \
 ```bash
 # Actualizar a una versión compatible
 COMPATIBLE_VERSION=$(aws eks describe-addon-versions --addon-name coredns \
-  --kubernetes-version 1.30 \
+  --kubernetes-version 1.36 \
   --query "addons[0].addonVersions[0].addonVersion" --output text)
 
 aws eks update-addon \
@@ -381,8 +381,8 @@ kubectl rollout status deploy/coredns -n kube-system
 
 CoreDNS caído = cluster efectivamente muerto (nada puede resolver nombres de
 Services). Después de un upgrade de cluster, SIEMPRE verificar la compatibilidad
-de los add-ons. El control plane puede estar en 1.30 pero los add-ons seguir en
-versiones de 1.29.
+de los add-ons. El control plane puede estar en 1.36 pero los add-ons seguir en
+versiones de 1.35.
 
 ---
 
