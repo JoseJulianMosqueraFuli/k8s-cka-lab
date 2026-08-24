@@ -54,7 +54,7 @@ Write-Host "  (La consola borra subnets, IGW y route tables automaticamente)" -F
 Write-Host "[7/7] Eliminando IAM roles..." -ForegroundColor Yellow
 aws iam detach-role-policy --role-name eks-automode-lab-cluster-role --policy-arn arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
 aws iam detach-role-policy --role-name eks-automode-lab-cluster-role --policy-arn arn:aws:iam::aws:policy/AmazonEKSComputePolicy
-aws iam detach-role-policy --role-name eks-automode-lab-cluster-role --policy-arn arn:aws:iam::aws:policy/AmazonEKSBlockStoragePolicy
+aws iam detach-role-policy --role-name eks-automode-lab-cluster-role --policy-arn arn:aws:iam::aws:policy/AmazonEKSBlockStoragePolicyV2
 aws iam detach-role-policy --role-name eks-automode-lab-cluster-role --policy-arn arn:aws:iam::aws:policy/AmazonEKSLoadBalancingPolicy
 aws iam detach-role-policy --role-name eks-automode-lab-cluster-role --policy-arn arn:aws:iam::aws:policy/AmazonEKSNetworkingPolicy
 aws iam delete-role --role-name eks-automode-lab-cluster-role

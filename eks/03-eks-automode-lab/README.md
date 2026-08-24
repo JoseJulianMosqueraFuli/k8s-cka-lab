@@ -1,6 +1,7 @@
 # Lab Manual: EKS Auto Mode en Virginia (us-east-1)
 
 ## Resumen
+
 Cluster EKS con Auto Mode — AWS gestiona todo: nodos, escalado, LB Controller, storage drivers.
 Tú solo despliegas pods. Es la forma más nueva y simple de usar EKS.
 Todo desde la consola de AWS + CLI.
@@ -8,6 +9,7 @@ Todo desde la consola de AWS + CLI.
 **Costo estimado:** ~$0.15-0.25/hr (EKS $0.10 + EC2 instancias que Auto Mode lance + ~12% management fee)
 
 **Herramientas necesarias en tu PC:**
+
 - AWS CLI v2
 - kubectl
 
@@ -54,6 +56,7 @@ de casi toda la infraestructura:
 ### ¿Cómo funciona por debajo?
 
 Auto Mode usa **EC2 por debajo** (no Fargate). La diferencia es:
+
 - Las instancias las elige y lanza AWS automáticamente (usando Karpenter)
 - Corren Bottlerocket (SO mínimo para contenedores, no Amazon Linux)
 - No puedes hacer SSH ni SSM a ellas
@@ -64,6 +67,7 @@ Auto Mode usa **EC2 por debajo** (no Fargate). La diferencia es:
 
 Karpenter es un autoscaler de nodos (open source, creado por AWS). A diferencia del
 Cluster Autoscaler clásico que trabaja con Auto Scaling Groups, Karpenter:
+
 - Observa pods en Pending
 - Calcula la instancia más eficiente para correrlos
 - La lanza directamente (sin ASG intermediario)
@@ -74,13 +78,14 @@ AWS expone su funcionalidad via **NodePools** y **NodeClasses**.
 
 ### Pricing: ¿Cuánto más cuesta?
 
-| Componente | Precio |
-|------------|--------|
-| Cluster EKS | $0.10/hr (igual que siempre) |
-| EC2 instances | Precio normal de EC2 |
+| Componente                     | Precio                                               |
+| ------------------------------ | ---------------------------------------------------- |
+| Cluster EKS                    | $0.10/hr (igual que siempre)                         |
+| EC2 instances                  | Precio normal de EC2                                 |
 | **Management fee (Auto Mode)** | ~12% sobre el precio EC2 de las instancias que lance |
 
 Ejemplo: si Auto Mode lanza un c6a.2xlarge ($0.306/hr), pagas:
+
 - $0.306 (EC2) + $0.037 (fee) = $0.343/hr por esa instancia
 
 A cambio, te ahorras gestionar LB Controller, Karpenter, EBS CSI, updates de nodos, etc.
@@ -89,17 +94,17 @@ A cambio, te ahorras gestionar LB Controller, Karpenter, EBS CSI, updates de nod
 
 ## Comparación: las 3 opciones
 
-| | Fargate | EC2 (Managed Nodes) | Auto Mode |
-|---|---|---|---|
-| Nodos visibles | No | Sí (EC2 instances) | No (ocultas desde abril 2026) |
-| Tipo de instancia | No aplica | Tú eliges | AWS elige la óptima |
-| LB Controller | Lo instalas tú | Opcional | Incluido |
-| Storage (EBS) | No soporta EBS | Instalas EBS CSI Driver | Incluido |
-| Escalado | Por pod (auto) | Manual/Cluster Autoscaler | Karpenter (auto) |
-| SSH a nodos | No | Sí | No |
-| Actualizaciones | N/A | Tú las aplicas | Automáticas (21 días máx) |
-| Network Policies | Limitado | Instalas Calico o Cilium | Incluido |
-| Complejidad setup | Alta | Media | Baja |
+|                   | Fargate        | EC2 (Managed Nodes)       | Auto Mode                     |
+| ----------------- | -------------- | ------------------------- | ----------------------------- |
+| Nodos visibles    | No             | Sí (EC2 instances)        | No (ocultas desde abril 2026) |
+| Tipo de instancia | No aplica      | Tú eliges                 | AWS elige la óptima           |
+| LB Controller     | Lo instalas tú | Opcional                  | Incluido                      |
+| Storage (EBS)     | No soporta EBS | Instalas EBS CSI Driver   | Incluido                      |
+| Escalado          | Por pod (auto) | Manual/Cluster Autoscaler | Karpenter (auto)              |
+| SSH a nodos       | No             | Sí                        | No                            |
+| Actualizaciones   | N/A            | Tú las aplicas            | Automáticas (21 días máx)     |
+| Network Policies  | Limitado       | Instalas Calico o Cilium  | Incluido                      |
+| Complejidad setup | Alta           | Media                     | Baja                          |
 
 ---
 
@@ -116,6 +121,7 @@ necesita gestionar EC2, EBS, ELB, etc. en tu nombre.
 
 1. Trusted entity type: **Custom trust policy**
 2. Pegar:
+
 ```json
 {
   "Version": "2012-10-17",
@@ -125,10 +131,7 @@ necesita gestionar EC2, EBS, ELB, etc. en tu nombre.
       "Principal": {
         "Service": "eks.amazonaws.com"
       },
-      "Action": [
-        "sts:AssumeRole",
-        "sts:TagSession"
-      ]
+      "Action": ["sts:AssumeRole", "sts:TagSession"]
     }
   ]
 }
@@ -140,9 +143,14 @@ Auto Mode usa session tags para rastrear qué recursos creó en tu cuenta.
 3. Next → buscar y marcar estas policies:
    - **AmazonEKSClusterPolicy** — permisos base del cluster
    - **AmazonEKSComputePolicy** — gestionar instancias EC2 (lanzar, terminar)
-   - **AmazonEKSBlockStoragePolicy** — gestionar volúmenes EBS
+   - **AmazonEKSBlockStoragePolicyV2** — gestionar volúmenes EBS
    - **AmazonEKSLoadBalancingPolicy** — crear y gestionar ALB/NLB
    - **AmazonEKSNetworkingPolicy** — gestionar ENIs y networking de pods
+
+> **Nota (actualización AWS):** la policy de block storage ahora es
+> `AmazonEKSBlockStoragePolicyV2`. AWS depreció la original
+> `AmazonEKSBlockStoragePolicy`; si usas la vieja, la consola te avisará
+> con "Cluster role missing recommended managed policies" al crear el cluster.
 
 4. Role name: `eks-automode-lab-cluster-role` → Create role
 
@@ -160,6 +168,7 @@ Las instancias que Auto Mode lanza necesitan un rol mínimo.
 
 1. Trusted entity type: **Custom trust policy**
 2. Pegar:
+
 ```json
 {
   "Version": "2012-10-17",
@@ -174,6 +183,7 @@ Las instancias que Auto Mode lanza necesitan un rol mínimo.
   ]
 }
 ```
+
 3. Next → buscar y marcar:
    - **AmazonEKSWorkerNodeMinimalPolicy** — permisos mínimos para unirse al cluster
    - **AmazonEC2ContainerRegistryPullOnly** — descargar imágenes de ECR
@@ -204,6 +214,7 @@ no necesita gestionar networking (eso lo hace el cluster role).
 ## Paso 3: Crear Cluster con Auto Mode
 
 Hay dos caminos en la consola:
+
 - **Quick configuration** — todo automático, AWS crea roles y VPC por ti
 - **Custom configuration** — tú controlas cada parámetro
 
@@ -255,6 +266,7 @@ Usamos **Custom configuration** porque ya creamos los roles y VPC manualmente
 ### Opción B: Quick Configuration (más rápido, menos control)
 
 Si prefieres la vía rápida:
+
 1. EKS → Add cluster → Create
 2. Confirmar **Quick configuration** seleccionado
 3. Nombre: `automode-lab-cluster`
@@ -285,6 +297,7 @@ aws eks update-kubeconfig --name automode-lab-cluster --region us-east-1
 ```
 
 Verificar:
+
 ```bash
 kubectl get nodes
 ```
@@ -296,6 +309,7 @@ que necesitan correr. Si no hay pods (aparte de los del sistema), puede que
 solo veas 1-2 nodos chicos para CoreDNS y componentes internos.
 
 Verificar pods del sistema:
+
 ```bash
 kubectl get pods -n kube-system
 ```
@@ -313,6 +327,7 @@ kubectl get nodepools
 ```
 
 Verás algo como:
+
 ```
 NAME              NODECLASS
 general-purpose   default
@@ -321,10 +336,10 @@ system            default
 
 #### ¿Qué hace cada NodePool?
 
-| NodePool | Propósito | Instancias que usa |
-|----------|-----------|-------------------|
-| `system` | Pods del sistema (CoreDNS, etc.) | Instancias pequeñas |
-| `general-purpose` | Tus workloads | AWS elige la más cost-effective |
+| NodePool          | Propósito                        | Instancias que usa              |
+| ----------------- | -------------------------------- | ------------------------------- |
+| `system`          | Pods del sistema (CoreDNS, etc.) | Instancias pequeñas             |
+| `general-purpose` | Tus workloads                    | AWS elige la más cost-effective |
 
 #### ¿Cómo decide Auto Mode qué instancia lanzar?
 
@@ -348,11 +363,13 @@ kubectl create deployment nginx --image=nginx:alpine --replicas=2 -n apps
 ```
 
 Observar:
+
 ```bash
 kubectl get pods -n apps -w
 ```
 
 Lo que pasa por debajo:
+
 1. Los pods quedan en `Pending` (no hay nodo con espacio)
 2. Karpenter detecta los pods Pending (~5 seg)
 3. Karpenter elige el tipo de instancia óptimo
@@ -378,6 +395,7 @@ Auto Mode incluye el AWS Load Balancer Controller como componente del cluster.
 No necesitas OIDC, ni Helm, ni IAM policies adicionales.
 
 Crea el archivo `nginx-service.yaml`:
+
 ```yaml
 apiVersion: v1
 kind: Service
@@ -403,6 +421,7 @@ kubectl apply -f nginx-service.yaml
 ```
 
 Esperar ~2-3 min:
+
 ```bash
 kubectl get svc nginx -n apps
 ```
@@ -418,6 +437,7 @@ le dices exactamente: "crea un NLB público con targets IP".
 #### ¿Y ALB (Application Load Balancer)?
 
 Si quieres un ALB (para routing HTTP por path/host), usas un Ingress:
+
 ```yaml
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -449,31 +469,177 @@ Esto crea un ALB automáticamente. Todo sin instalar Helm ni nada.
 
 Vamos a ver cómo Auto Mode escala automáticamente.
 
+> **⚠️ Importante:** escalar réplicas por sí solo **NO** obliga a Karpenter a
+> lanzar nodos. Lo que dispara a Karpenter es que haya pods en `Pending` porque
+> **no caben**. Si tus pods no declaran `resources.requests`, para el scheduler
+> "pesan cero" y caben todos en el nodo actual (verás los 10 pods en el mismo
+> nodo y ningún nodo nuevo). Por eso primero les damos un request de CPU real.
+
+### 1. Darle a los pods un request de CPU
+
 ```bash
-# Escalar a 10 réplicas
+kubectl set resources deployment nginx -n apps --requests=cpu=500m,memory=256Mi
+```
+
+Ahora cada pod pide 0.5 vCPU. 10 réplicas = ~5 vCPU, que no caben en un solo
+nodo chico → Karpenter tendrá que agregar capacidad.
+
+### 2. Escalar a 10 réplicas
+
+```bash
 kubectl scale deployment nginx --replicas=10 -n apps
 ```
 
 Observar:
+
 ```bash
-kubectl get pods -n apps -w
+kubectl get pods -n apps -o wide -w
 kubectl get nodes -w  # en otra terminal
 ```
 
-Verás que Auto Mode lanza más nodos automáticamente para acomodar los 10 pods.
-Cuando reduces las réplicas, después de unos minutos consolida y elimina nodos vacíos.
+Ahora sí: varios pods quedan `Pending`, Karpenter los detecta y lanza uno o más
+nodos nuevos del NodePool `general-purpose`. Fíjate en la columna `NODE` de los
+pods: se reparten entre varios nodos.
+
+Para ver qué instancias eligió Karpenter:
 
 ```bash
-# Reducir a 2 réplicas
+kubectl get nodes -o custom-columns='NODE:.metadata.name,INSTANCE:.metadata.labels.node\.kubernetes\.io/instance-type,ZONE:.metadata.labels.topology\.kubernetes\.io/zone'
+```
+
+### 3. Reducir y observar la consolidación
+
+```bash
 kubectl scale deployment nginx --replicas=2 -n apps
 ```
 
-Espera ~5-10 min y verás que Auto Mode termina los nodos que ya no necesita.
-Esto es **Karpenter consolidation** — optimiza costos automáticamente.
+Espera ~5-10 min y verás que Auto Mode reprograma los pods en menos nodos y
+termina los que quedan vacíos. Esto es **Karpenter consolidation** — optimiza
+costos automáticamente.
 
 ---
 
-## Paso 10: (Bonus) Volúmenes persistentes
+## Paso 10: Autoscaling de pods con HPA (y cómo se encadena con Karpenter)
+
+En el Paso 9 escalamos **a mano** (`kubectl scale`) y Karpenter reaccionó a los
+pods `Pending`. Pero Karpenter **no mira tráfico**: solo escala **nodos** cuando
+hay pods que no caben. Para escalar por **carga real** necesitas otra capa, el
+**Horizontal Pod Autoscaler (HPA)**, que escala **réplicas** según uso de CPU/memoria.
+
+Las dos capas se encadenan:
+
+```
+Tráfico ↑  →  CPU de pods ↑  →  HPA agrega réplicas  →  pods Pending  →  Karpenter agrega nodos
+Tráfico ↓  →  CPU de pods ↓  →  HPA quita réplicas   →  nodos vacíos   →  Karpenter consolida
+```
+
+| Capa                  | Qué observa                        | Qué escala                | Quién lo provee                    |
+| --------------------- | ---------------------------------- | ------------------------- | ---------------------------------- |
+| HPA                   | Uso de CPU/mem (o métricas custom) | Número de réplicas (pods) | Controller de K8s + metrics-server |
+| Karpenter (Auto Mode) | Pods en `Pending`                  | Nodos (EC2)               | AWS (integrado)                    |
+
+> **Prerrequisitos que Auto Mode ya cumple:** el HPA necesita `metrics-server`
+> (ya corre en `kube-system`) y que los pods declaren `resources.requests` de CPU
+> (el HPA calcula el % de uso contra ese request).
+
+### 1. Desplegar una app que sí consuma CPU bajo carga
+
+nginx sirve páginas estáticas y casi no gasta CPU, así que es mala para demostrar
+HPA. Usamos la app oficial de ejemplo (`hpa-example`, un php-apache que hace un
+cálculo pesado por cada request):
+
+```bash
+cat > php-apache.yaml <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: php-apache
+  namespace: apps
+spec:
+  selector:
+    matchLabels:
+      run: php-apache
+  template:
+    metadata:
+      labels:
+        run: php-apache
+    spec:
+      containers:
+        - name: php-apache
+          image: registry.k8s.io/hpa-example
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 200m
+            limits:
+              cpu: 500m
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: php-apache
+  namespace: apps
+spec:
+  ports:
+    - port: 80
+  selector:
+    run: php-apache
+EOF
+
+kubectl apply -f php-apache.yaml
+kubectl rollout status deployment php-apache -n apps
+```
+
+### 2. Crear el HPA
+
+```bash
+kubectl autoscale deployment php-apache -n apps --cpu-percent=50 --min=1 --max=10
+kubectl get hpa -n apps
+```
+
+`TARGETS` mostrará `<unknown>/50%` por unos segundos hasta que `metrics-server`
+reporte, luego `0%/50%` (idle, sin carga).
+
+### 3. Generar carga
+
+En **otra pestaña**, lanza un generador que bombardee el service:
+
+```bash
+kubectl run load-generator -n apps --image=busybox:1.28 --restart=Never -- \
+  /bin/sh -c "while true; do wget -q -O- http://php-apache; done"
+```
+
+### 4. Observar el encadenamiento
+
+```bash
+kubectl get hpa -n apps -w        # TARGETS sube sobre 50%, REPLICAS crece
+kubectl get pods -n apps -o wide  # nuevos pods php-apache; algunos Pending
+kubectl get nodes -w              # Karpenter agrega nodos si hacen falta
+```
+
+CPU dispara sobre 50% → el HPA sube réplicas hacia el máximo → si no caben,
+Karpenter mete nodos. El encadenamiento completo, en vivo.
+
+### 5. Quitar la carga y ver el camino inverso
+
+```bash
+kubectl delete pod load-generator -n apps
+```
+
+CPU baja → el HPA reduce réplicas (por defecto espera ~5 min de estabilización
+antes de bajar, para no hacer "flapping") → nodos quedan vacíos → Karpenter consolida.
+
+### 6. Limpiar el demo de HPA
+
+```bash
+kubectl delete hpa php-apache -n apps
+kubectl delete -f php-apache.yaml
+```
+
+---
+
+## Paso 11: (Bonus) Volúmenes persistentes
 
 Auto Mode incluye el EBS CSI Driver. Puedes crear PVCs directamente:
 
@@ -506,10 +672,10 @@ En EC2/Fargate clásico, tendrías que instalar el EBS CSI Driver manualmente
 
 ### NodePool vs NodeClass
 
-| Concepto | Qué define | Ejemplo |
-|----------|-----------|---------|
-| **NodePool** | Restricciones de scheduling (qué pods van a qué nodos) | "Nodos para workloads general-purpose" |
-| **NodeClass** | Configuración de la infra (AMI, subnets, storage) | "Usar subnets privadas, disco gp3 de 50GB" |
+| Concepto      | Qué define                                             | Ejemplo                                    |
+| ------------- | ------------------------------------------------------ | ------------------------------------------ |
+| **NodePool**  | Restricciones de scheduling (qué pods van a qué nodos) | "Nodos para workloads general-purpose"     |
+| **NodeClass** | Configuración de la infra (AMI, subnets, storage)      | "Usar subnets privadas, disco gp3 de 50GB" |
 
 Los NodePools built-in (`general-purpose`, `system`) usan la NodeClass `default`.
 Puedes crear custom NodePools si necesitas nodos GPU, nodos Spot, etc.
@@ -522,25 +688,26 @@ Puedes cambiar esto en la configuración de visibilidad de recursos administrado
 
 ### Límites de Auto Mode
 
-| Lo que NO puedes hacer | Alternativa |
-|------------------------|-------------|
-| SSH/SSM a los nodos | Usar `kubectl exec` para entrar a los pods |
-| Instalar software en los nodos | Usar DaemonSets o sidecars |
-| Elegir AMI custom | Crear un NodeClass custom (limitado a Bottlerocket) |
-| Usar instancias GPU específicas | Crear un NodePool custom con constraints |
-| Mantener nodos más de 21 días | No hay alternativa — es un requisito de seguridad |
+| Lo que NO puedes hacer          | Alternativa                                         |
+| ------------------------------- | --------------------------------------------------- |
+| SSH/SSM a los nodos             | Usar `kubectl exec` para entrar a los pods          |
+| Instalar software en los nodos  | Usar DaemonSets o sidecars                          |
+| Elegir AMI custom               | Crear un NodeClass custom (limitado a Bottlerocket) |
+| Usar instancias GPU específicas | Crear un NodePool custom con constraints            |
+| Mantener nodos más de 21 días   | No hay alternativa — es un requisito de seguridad   |
 
 ---
 
 ## Errores comunes y soluciones
 
-| Error | Causa | Solución |
-|-------|-------|----------|
-| Cluster role error al crear | Faltan policies (Compute, Storage, etc.) | Agregar las 5 policies al cluster role |
-| "insufficient permissions" en cluster role | Falta `sts:TagSession` en trust policy | Agregar `sts:TagSession` a la trust policy |
-| Pods en Pending por mucho tiempo | NodePool no matchea los requirements del pod | Verificar labels/taints del NodePool con `kubectl describe nodepool` |
-| LB no se crea | Subnets no taggeadas correctamente | Auto Mode debería taggearlas, pero verificar tags `kubernetes.io/role/elb` en públicas |
-| Nodos no se crean | Problemas de cuota EC2 o subnet sin IPs | Verificar Service Quotas y CIDR de subnets |
+| Error                                                                              | Causa                                                | Solución                                                                               |
+| ---------------------------------------------------------------------------------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Cluster role error al crear                                                        | Faltan policies (Compute, Storage, etc.)             | Agregar las 5 policies al cluster role                                                 |
+| "Cluster role missing recommended managed policies: AmazonEKSBlockStoragePolicyV2" | Tienes la policy vieja `AmazonEKSBlockStoragePolicy` | Adjuntar `AmazonEKSBlockStoragePolicyV2` y desadjuntar la vieja                        |
+| "insufficient permissions" en cluster role                                         | Falta `sts:TagSession` en trust policy               | Agregar `sts:TagSession` a la trust policy                                             |
+| Pods en Pending por mucho tiempo                                                   | NodePool no matchea los requirements del pod         | Verificar labels/taints del NodePool con `kubectl describe nodepool`                   |
+| LB no se crea                                                                      | Subnets no taggeadas correctamente                   | Auto Mode debería taggearlas, pero verificar tags `kubernetes.io/role/elb` en públicas |
+| Nodos no se crean                                                                  | Problemas de cuota EC2 o subnet sin IPs              | Verificar Service Quotas y CIDR de subnets                                             |
 
 ---
 
@@ -584,8 +751,8 @@ esperar a que los recursos se eliminen antes de continuar al siguiente paso.
 
 ## Resumen: ¿Cuándo usar cada opción?
 
-| Usa... | Cuando... |
-|--------|-----------|
-| **Fargate** | Quieres serverless puro, pods esporádicos, no quieres pagar por nodos idle |
+| Usa...                  | Cuando...                                                                        |
+| ----------------------- | -------------------------------------------------------------------------------- |
+| **Fargate**             | Quieres serverless puro, pods esporádicos, no quieres pagar por nodos idle       |
 | **EC2 (Managed Nodes)** | Necesitas control total: SSH, AMIs custom, GPUs específicas, compliance estricto |
-| **Auto Mode** | Quieres la simplicidad de Fargate con la flexibilidad de EC2, sin gestionar nada |
+| **Auto Mode**           | Quieres la simplicidad de Fargate con la flexibilidad de EC2, sin gestionar nada |
