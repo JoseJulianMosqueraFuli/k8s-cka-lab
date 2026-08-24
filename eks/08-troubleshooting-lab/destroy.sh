@@ -4,7 +4,7 @@
 
 set -uo pipefail
 REGION="${AWS_REGION:-us-east-1}"
-CLUSTER_NAME="eks-troubleshoot-lab"
+CLUSTER_NAME="${EKS_CLUSTER:-eks-troubleshoot-lab}"
 
 echo "=== DESTRUYENDO LAB 08 (Troubleshooting) ==="
 echo "Borrando cluster desechable: $CLUSTER_NAME"

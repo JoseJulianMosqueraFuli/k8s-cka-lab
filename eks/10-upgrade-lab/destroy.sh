@@ -6,6 +6,7 @@
 
 set -uo pipefail
 REGION="${AWS_REGION:-us-east-1}"
+GREEN_CLUSTER="${EKS_GREEN_CLUSTER:-eks-green-lab}"
 
 echo "=== DESTRUYENDO LAB 10 (Upgrade) ==="
 
@@ -16,17 +17,17 @@ kubectl delete pdb upgrade-test-pdb too-strict pdb-strict 2>/dev/null
 
 # 2. Cluster GREEN (blue/green strategy)
 echo "[2/3] Verificando cluster GREEN..."
-if aws eks describe-cluster --name eks-green-lab --region "$REGION" >/dev/null 2>&1; then
-  read -rp "¿Borrar el cluster GREEN (eks-green-lab)? [s/N]: " ans
+if aws eks describe-cluster --name "$GREEN_CLUSTER" --region "$REGION" >/dev/null 2>&1; then
+  read -rp "¿Borrar el cluster GREEN ($GREEN_CLUSTER)? [s/N]: " ans
   if [[ "$ans" =~ ^[sS]$ ]]; then
     if [[ -d "infra/terraform/green" ]]; then
       echo "  Destruyendo con Terraform..."
       cd infra/terraform/green && terraform destroy -auto-approve && cd ../../..
     else
       echo "  Sin Terraform state. Borrando con AWS CLI..."
-      aws eks delete-cluster --name eks-green-lab --region "$REGION"
+      aws eks delete-cluster --name "$GREEN_CLUSTER" --region "$REGION"
       echo "  Esperando... (puede tardar ~10 min)"
-      aws eks wait cluster-deleted --name eks-green-lab --region "$REGION" 2>/dev/null
+      aws eks wait cluster-deleted --name "$GREEN_CLUSTER" --region "$REGION" 2>/dev/null
     fi
   fi
 else

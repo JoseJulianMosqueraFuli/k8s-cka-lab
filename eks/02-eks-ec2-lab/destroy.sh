@@ -8,7 +8,7 @@
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)/eks-teardown-lib.sh"
 
-CLUSTER="ec2-lab-cluster"
+CLUSTER="${EKS_CLUSTER:-ec2-lab-cluster}"
 NAMESPACE="apps"
 CLUSTER_ROLE="eks-ec2-lab-cluster-role"
 NODE_ROLE="eks-ec2-lab-node-role"

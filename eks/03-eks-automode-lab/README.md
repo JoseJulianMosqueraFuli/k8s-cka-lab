@@ -799,12 +799,34 @@ Auto Mode hace la destrucción más simple porque hay menos cosas que creaste ma
 
 ### Ejecutar script de destrucción:
 
+Windows (PowerShell):
+
 ```powershell
 .\destroy.ps1
 ```
 
+bash / WSL / CloudShell:
+
+```bash
+./destroy.sh          # pide confirmación
+./destroy.sh --yes    # sin preguntar
+```
+
 El script se ejecuta de corrido sin intervención manual. Usa `aws eks wait` para
 esperar a que los recursos se eliminen antes de continuar al siguiente paso.
+
+> **Nombre del cluster distinto al default:** si tu cluster no se llama
+> `automode-lab-cluster` (por ejemplo la consola le puso un nombre generado),
+> pásalo por la variable de entorno `EKS_CLUSTER`:
+>
+> ```bash
+> EKS_CLUSTER=mi-cluster ./destroy.sh --yes
+> ```
+>
+> Todos los `destroy.sh` de estos labs aceptan `EKS_CLUSTER` (y `AWS_REGION`)
+> para no depender del nombre hardcodeado. El `destroy.sh` resuelve la VPC a
+> partir del cluster, así que con el nombre correcto limpia todo (incluida la
+> VPC, que el `destroy.ps1` deja como paso manual).
 
 ---
 

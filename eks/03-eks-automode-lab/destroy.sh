@@ -12,7 +12,7 @@
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)/eks-teardown-lib.sh"
 
-CLUSTER="automode-lab-cluster"
+CLUSTER="${EKS_CLUSTER:-automode-lab-cluster}"
 NAMESPACE="apps"
 CLUSTER_ROLE="eks-automode-lab-cluster-role"
 NODE_ROLE="eks-automode-lab-node-role"

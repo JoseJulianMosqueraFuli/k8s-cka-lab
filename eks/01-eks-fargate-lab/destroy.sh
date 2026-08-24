@@ -13,7 +13,7 @@
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)/eks-teardown-lib.sh"
 
-CLUSTER="lab-cluster"
+CLUSTER="${EKS_CLUSTER:-lab-cluster}"
 NAMESPACE="apps"
 CLUSTER_ROLE="eks-lab-cluster-role"
 FARGATE_ROLE="eks-lab-fargate-role"

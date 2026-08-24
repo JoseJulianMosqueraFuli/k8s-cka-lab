@@ -5,6 +5,7 @@ set -uo pipefail
 REGION="${AWS_REGION:-us-east-1}"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 TF_BUCKET="terraform-state-${ACCOUNT_ID}-us-east-1"
+CLUSTER_NAME="${EKS_CLUSTER:-eks-gitops-lab}"
 
 echo "=== DESTRUYENDO LAB 09 (IaC + GitOps) ==="
 
@@ -16,12 +17,12 @@ kubectl delete namespace argocd argo-rollouts apps 2>/dev/null
 
 # 2. Cluster eksctl (si se creó)
 echo "[2/5] Buscando cluster eksctl..."
-if aws eks describe-cluster --name eks-gitops-lab --region "$REGION" >/dev/null 2>&1; then
+if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
   if command -v eksctl >/dev/null 2>&1; then
-    echo "  Borrando cluster eksctl (eks-gitops-lab)..."
-    eksctl delete cluster --name eks-gitops-lab --region "$REGION" --wait
+    echo "  Borrando cluster eksctl ($CLUSTER_NAME)..."
+    eksctl delete cluster --name "$CLUSTER_NAME" --region "$REGION" --wait
   else
-    echo "  eksctl no instalado. Borra manualmente el cluster eks-gitops-lab"
+    echo "  eksctl no instalado. Borra manualmente el cluster $CLUSTER_NAME"
   fi
 fi
 
