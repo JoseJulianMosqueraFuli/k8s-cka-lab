@@ -406,15 +406,22 @@ kubectl apply -f manifests/deploy-podid.yaml
 # IRSA
 kubectl port-forward -n apps deploy/identity-api-irsa 8080:8080 &
 curl -s http://localhost:8080/identity | jq .
+# → ARN del rol eks-lab-s3-reader-irsa, sin error
+curl -s http://localhost:8080/s3 | jq .
+# → content: "Este texto lo leyó el pod desde S3"
 kill %1
 
 # Pod Identity
 kubectl port-forward -n apps deploy/identity-api-podid 8080:8080 &
 curl -s http://localhost:8080/identity | jq .
+curl -s http://localhost:8080/s3 | jq .
 kill %1
 ```
 
-Ambos deben devolver un ARN con el rol correspondiente y sin error.
+Ambos métodos deben devolver el ARN del rol correspondiente sin error, y `/s3`
+debe devolver el contenido del objeto que subiste en el paso 1. Ahí se ejercita de
+verdad la policy de mínimo privilegio: el pod hizo `s3:GetObject` sobre
+`lab-data/secret.txt` con su rol acotado, no con las credenciales del nodo.
 
 ---
 
@@ -470,10 +477,13 @@ Reinicia el pod y verifica:
 kubectl rollout restart deploy/identity-api-irsa -n apps
 kubectl port-forward -n apps deploy/identity-api-irsa 8080:8080 &
 curl -s http://localhost:8080/identity | jq .
+curl -s http://localhost:8080/s3 | jq .
 kill %1
 ```
 
-Verás: `"error": "sts:AssumeRoleWithWebIdentity failed: AccessDenied"`.
+Verás en `/identity`: `"error": "sts:AssumeRoleWithWebIdentity failed: AccessDenied"`.
+Y en `/s3`: `"error": "s3:GetObject failed: ... AccessDenied"`. El `sub` bloqueó
+la obtención de credenciales, así que S3 ni siquiera llega a intentarse.
 
 **Lección:** el `sub` actúa como una llave. Si no coincide exactamente
 (namespace + nombre del SA), no hay credenciales.
@@ -482,16 +492,18 @@ Verás: `"error": "sts:AssumeRoleWithWebIdentity failed: AccessDenied"`.
 
 ```bash
 kubectl run naked-pod --image=<TU_IMAGE> -n apps \
-  --env="POD_NAME=naked" --env="NODE_NAME=test" --env="POD_NAMESPACE=apps"
+  --env="POD_NAME=naked" --env="NODE_NAME=test" --env="POD_NAMESPACE=apps" \
+  --env="S3_BUCKET=$BUCKET_NAME" --env="S3_KEY=lab-data/secret.txt"
 
 kubectl port-forward -n apps pod/naked-pod 8080:8080 &
 curl -s http://localhost:8080/identity | jq .
+curl -s http://localhost:8080/s3 | jq .
 kill %1
 kubectl delete pod naked-pod -n apps
 ```
 
-Resultado: `"error": "no credentials available"`. Un pod sin ServiceAccount
-específico usa el SA `default`, que no tiene ninguna asociación.
+Resultado: `"error": "no credentials available"` en ambos endpoints. Un pod sin
+ServiceAccount específico usa el SA `default`, que no tiene ninguna asociación.
 
 ### 7.3 Leer el error STS completo
 
@@ -557,6 +569,7 @@ aws eks associate-access-policy \
 | Síntoma                                | Causa probable                                  | Fix                                                          |
 | -------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------ |
 | `AccessDenied` en STS                  | Trust policy `sub` no coincide                  | Verificar namespace y nombre del SA exacto                   |
+| `/s3` da AccessDenied pero `/identity` funciona | La policy `s3-read-policy.json` no cubre el bucket/prefix | Revisar `Resource` y la condición `s3:prefix`     |
 | Pod no tiene variables `AWS_*`         | ServiceAccount sin anotación (IRSA)             | Agregar `eks.amazonaws.com/role-arn`                         |
 | `could not get token` con Pod Identity | Add-on no instalado                             | `aws eks describe-addon --addon-name eks-pod-identity-agent` |
 | Credenciales del nodo en vez del rol   | `hostNetwork: true` o IMDS hop limit incorrecto | Verificar spec del pod y node metadata options               |

@@ -4,7 +4,7 @@
 
 Construyes un backend propio en Go, lo empujas a ECR, lo despliegas en el cluster,
 y lo expones con un ALB (Application Load Balancer) por Ingress con HTTPS y
-certificado de ACM. Routing por path: `/identity` y `/healthz`.
+certificado de ACM. Routing por path: `/identity`, `/s3` y `/healthz`.
 
 Este lab cierra el hueco más grande del nivel 1: los labs 01-03 terminan con un
 NLB en capa 4, HTTP plano, y una imagen pública de Docker Hub. Nada de eso pasa en
@@ -38,6 +38,7 @@ producción.
 Internet → ALB (HTTPS, cert ACM) → Ingress → Service → Pods (tu imagen desde ECR)
                                       │
                                       ├─ /identity  → responde quién es el pod y qué credenciales tiene
+                                      ├─ /s3        → lee un objeto de S3 (lo ejercita el lab 05)
                                       └─ /healthz   → health check del target group
 ```
 
@@ -45,6 +46,11 @@ El endpoint `/identity` llama a `sts:GetCallerIdentity` y devuelve:
 
 - Sin credenciales configuradas → error explicando que el pod no tiene acceso a AWS
 - Con Pod Identity o IRSA (lab 05) → el ARN del rol acotado
+
+El endpoint `/s3` hace `s3:GetObject` sobre las variables `S3_BUCKET`/`S3_KEY` y
+devuelve el contenido del objeto. Sin credenciales, con la policy equivocada, o
+sin las variables, devuelve el error exacto — es lo que vas a ver y diagnosticar
+en el lab 05.
 
 Así la misma imagen te sirve para los labs 04 y 05 sin reconstruirla.
 
@@ -110,11 +116,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
@@ -126,6 +135,14 @@ type IdentityResponse struct {
 	Arn       string `json:"arn,omitempty"`
 	UserID    string `json:"userId,omitempty"`
 	Error     string `json:"error,omitempty"`
+}
+
+type S3Response struct {
+	Pod     string `json:"pod"`
+	Bucket  string `json:"bucket,omitempty"`
+	Key     string `json:"key,omitempty"`
+	Content string `json:"content,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 func identityHandler(w http.ResponseWriter, r *http.Request) {
@@ -156,6 +173,49 @@ func identityHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func s3Handler(w http.ResponseWriter, r *http.Request) {
+	resp := S3Response{
+		Pod:    os.Getenv("POD_NAME"),
+		Bucket: os.Getenv("S3_BUCKET"),
+		Key:    os.Getenv("S3_KEY"),
+	}
+
+	if resp.Bucket == "" || resp.Key == "" {
+		resp.Error = "S3_BUCKET y S3_KEY no están definidos (agrégalos en el Deployment)"
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	cfg, err := config.LoadDefaultConfig(context.Background())
+	if err != nil {
+		resp.Error = fmt.Sprintf("no credentials available: %v", err)
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	client := s3.NewFromConfig(cfg)
+	output, err := client.GetObject(context.Background(), &s3.GetObjectInput{
+		Bucket: aws.String(resp.Bucket),
+		Key:    aws.String(resp.Key),
+	})
+	if err != nil {
+		resp.Error = fmt.Sprintf("s3:GetObject failed: %v", err)
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	defer output.Body.Close()
+
+	body, err := io.ReadAll(output.Body)
+	if err != nil {
+		resp.Error = fmt.Sprintf("reading object failed: %v", err)
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	resp.Content = string(body)
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -168,6 +228,7 @@ func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 
 func main() {
 	http.HandleFunc("/identity", identityHandler)
+	http.HandleFunc("/s3", s3Handler)
 	http.HandleFunc("/healthz", healthHandler)
 
 	port := os.Getenv("PORT")
@@ -189,6 +250,7 @@ go 1.22
 require (
 	github.com/aws/aws-sdk-go-v2 v1.30.0
 	github.com/aws/aws-sdk-go-v2/config v1.27.0
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.58.0
 	github.com/aws/aws-sdk-go-v2/service/sts v1.30.0
 )
 ```
@@ -207,12 +269,12 @@ cd app && go mod tidy
 > versiones más recientes, o cambia a `github.com/aws/aws-sdk-go-v2 latest` y deja
 > que tidy las fije.
 
-### ¿Por qué `/identity` devuelve 200 siempre?
+### ¿Por qué `/identity` y `/s3` devuelven 200 siempre?
 
-Si devolviera 500 cuando no hay credenciales, contaminarías las métricas del target
-group (el ALB reportaría targets unhealthy). El health check apunta a `/healthz`,
-que siempre es 200. Así separas "el pod está vivo" de "el pod tiene credenciales
-AWS". Son dos preguntas distintas.
+Si devolvieran 500 cuando no hay credenciales, contaminarías las métricas del
+target group (el ALB reportaría targets unhealthy). El health check apunta a
+`/healthz`, que siempre es 200. Así separas "el pod está vivo" de "el pod tiene
+credenciales AWS" (y de "el pod puede leer S3"). Son preguntas distintas.
 
 ### ¿Por qué Go y no Python?
 
@@ -440,6 +502,13 @@ spec:
                 name: identity-api
                 port:
                   number: 80
+          - path: /s3
+            pathType: Prefix
+            backend:
+              service:
+                name: identity-api
+                port:
+                  number: 80
           - path: /healthz
             pathType: Exact
             backend:
@@ -449,10 +518,11 @@ spec:
                   number: 80
 ```
 
-> **Nota de seguridad:** en producción no expondrías `/healthz` a internet — es
-> información interna. El ALB health check funciona sin exponer el path
-> públicamente (usa el health check configurado en la anotación contra los pods
-> directamente). Aquí lo exponemos para poder verificar con `curl` desde afuera.
+> **Nota de seguridad:** en producción no expondrías `/healthz` ni `/s3` a
+> internet — son información interna. El ALB health check funciona sin exponer el
+> path públicamente (usa el health check configurado en la anotación contra los
+> pods directamente). Aquí los exponemos para poder verificar con `curl` desde
+> afuera. En el lab 05 verificarás `/s3` igualmente con `port-forward`.
 
 ```bash
 kubectl apply -f manifests/ingress.yaml
@@ -504,6 +574,13 @@ curl -s http://$ALB_DNS/identity | jq .
 #   "node": "ip-10-0-1-50.ec2.internal",
 #   "namespace": "apps",
 #   "error": "no credentials available: ..."
+# }
+
+# S3 (sin variables ni credenciales — comportamiento correcto antes del lab 05)
+curl -s http://$ALB_DNS/s3 | jq .
+# {
+#   "pod": "identity-api-7f8b9c6d4-x2k9m",
+#   "error": "S3_BUCKET y S3_KEY no están definidos (agrégalos en el Deployment)"
 # }
 ```
 
@@ -654,5 +731,5 @@ aws acm delete-certificate --certificate-arn $CERT_ARN --region $REGION 2>/dev/n
    permitir `hostNetwork` por política.
 
 5. **La imagen que construiste aquí te sirve para los labs 05, 06, 08 y 09.**
-   No la borres. Un solo endpoint (`/identity`) te enseña credenciales, balanceo,
-   autoscaling y troubleshooting con la misma imagen.
+   No la borres. Dos endpoints (`/identity` y `/s3`) te enseñan credenciales,
+   lectura de S3, balanceo, autoscaling y troubleshooting con la misma imagen.
