@@ -641,9 +641,48 @@ kubectl delete -f php-apache.yaml
 
 ## Paso 11: (Bonus) Volúmenes persistentes
 
-Auto Mode incluye el EBS CSI Driver. Puedes crear PVCs directamente:
+Auto Mode incluye la capacidad de EBS integrada, pero con **dos diferencias
+clave** respecto al EBS CSI clásico:
 
-```yaml
+1. **No hay StorageClass por defecto.** Auto Mode NO crea una StorageClass por ti.
+   Debes crear una que use el provisioner de Auto Mode: `ebs.csi.eks.amazonaws.com`
+   (ojo: distinto del clásico `ebs.csi.aws.com`). Un PVC con `storageClassName: gp3`
+   se quedaría en `Pending` para siempre si esa StorageClass no existe.
+2. **La `gp2` que ves NO sirve.** EKS trae por herencia una StorageClass `gp2` con
+   el provisioner in-tree `kubernetes.io/aws-ebs`, que en Auto Mode no funciona
+   (no hay in-tree provisioner ni EBS CSI clásico). No la uses.
+
+### 1. Crear la StorageClass de Auto Mode
+
+```bash
+cat > auto-ebs-sc.yaml <<'EOF'
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.eks.amazonaws.com
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  type: gp3
+  encrypted: "true"
+allowVolumeExpansion: true
+EOF
+
+kubectl apply -f auto-ebs-sc.yaml
+kubectl get storageclass
+```
+
+`volumeBindingMode: WaitForFirstConsumer` es importante: el volumen **no se crea
+hasta que un pod use el PVC**. Como un volumen EBS vive en una sola AZ, así se
+crea en la misma zona donde el scheduler coloque el pod. Por eso un PVC solo, sin
+pod, se queda en `Pending` — no es un error, es lo esperado.
+
+### 2. Crear el PVC junto con un pod que lo monte
+
+```bash
+cat > ebs-demo.yaml <<'EOF'
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -656,15 +695,57 @@ spec:
   resources:
     requests:
       storage: 5Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ebs-writer
+  namespace: apps
+spec:
+  containers:
+    - name: app
+      image: busybox:1.28
+      command: ["/bin/sh", "-c", "echo 'hola desde EBS en Auto Mode' > /data/hello.txt && sleep 3600"]
+      volumeMounts:
+        - name: vol
+          mountPath: /data
+  volumes:
+    - name: vol
+      persistentVolumeClaim:
+        claimName: test-pvc
+EOF
+
+kubectl apply -f ebs-demo.yaml
+kubectl get pvc -n apps -w
 ```
+
+El PVC arranca en `Pending` y pasa a `Bound` en cuanto el pod se schedulea y Auto
+Mode aprovisiona el volumen EBS en la AZ del nodo (~30-60s, muchas veces segundos).
+
+### 3. Verificar
 
 ```bash
-kubectl apply -f test-pvc.yaml
-kubectl get pvc -n apps
+kubectl get pvc,pv -n apps
+kubectl exec -n apps ebs-writer -- cat /data/hello.txt   # -> hola desde EBS en Auto Mode
 ```
 
+Verás el PV dinámico (con reclaim policy `Delete`) y el archivo persistido en el volumen.
+
+### 4. Limpiar el demo de EBS
+
+```bash
+kubectl delete -f ebs-demo.yaml
+# La StorageClass es cluster-scoped; se va con el cluster, pero puedes borrarla:
+kubectl delete -f auto-ebs-sc.yaml
+```
+
+> **Nota de costo:** con reclaim policy `Delete`, al borrar el PVC el EBS se borra
+> solo. Si borraras el cluster con PVCs aún vivos, los volúmenes podrían quedar
+> huérfanos cobrando; por eso el `destroy.sh` borra los PVC ANTES que el cluster.
+
 En EC2/Fargate clásico, tendrías que instalar el EBS CSI Driver manualmente
-(con OIDC + IAM role + Helm). En Auto Mode ya está listo.
+(con OIDC + IAM role + Helm) y crear la StorageClass. En Auto Mode la capacidad ya
+viene integrada; solo defines la StorageClass y listo.
 
 ---
 
