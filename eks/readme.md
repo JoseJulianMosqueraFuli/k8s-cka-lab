@@ -3,8 +3,7 @@
 Ruta de práctica para entender EKS por capas, en tres niveles: **fundamentos**
 (levantar un cluster), **operación** (mantenerlo vivo) y **producción** (operarlo
 en equipo sin tocarlo a mano). Los labs 01-04 están hechos y verificados; del 05
-al 13 están diseñados como guías completas, y el 14 (caos) queda anotado como
-propuesta, en el [roadmap](#roadmap).
+al 14 están diseñados como guías completas en el [roadmap](#roadmap).
 
 > Los labs son **guías, no manifiestos**: los archivos (manifests, políticas,
 > Terraform, código Go) se escriben siguiendo los pasos del README. Los únicos
@@ -218,7 +217,7 @@ el salto entre niveles importa más que los labs individuales.
 | **1 · Fundamentos**        | 01-04 | ¿cómo levanto un cluster y expongo una app?               | 01-04 ✅ · 05-13 📋 guías listas |
 | **2 · Operación (día 2)**  | 05-08 | ¿cómo lo mantengo vivo?                                   | 📋 guías listas                  |
 | **3 · Producción**         | 09-13 | ¿cómo lo operamos varios, sin tocarlo a mano?             | 📋 guías listas                  |
-| **4 · Resiliencia y caos** | 14    | ¿cómo se comporta el sistema cuando algo falla de verdad? | 🧪 propuesto (por diseñar)       |
+| **4 · Resiliencia y caos** | 14    | ¿cómo se comporta el sistema cuando algo falla de verdad? | 📋 guía lista (2 variantes)      |
 
 El nivel 3 es el que separa "sé usar EKS" de "sé operar EKS en producción con un
 equipo". No cambia la tecnología, cambia el proceso.
@@ -547,7 +546,8 @@ gracia o se cae en cascada? No se prueba con teoría, se prueba rompiendo a
 propósito y midiendo.
 
 > **Prerrequisito real:** este nivel solo significa algo si ya tienes SLOs definidos
-> (lab 12) y una app con varias dependencias desplegada por GitOps (lab 09). Sin un
+> (lab 12) y una app con varias dependencias desplegada de forma declarativa —Terraform
+> o GitOps— (lab 09). Sin un
 > estado estable medible, el caos es solo apagar cosas al azar.
 
 ### 14 · Chaos engineering — romper un sistema real y medir la resiliencia
@@ -577,12 +577,14 @@ dependencias reales, para validar patrones de resiliencia.
   SLI), formulas una hipótesis, inyectas el fallo con el **menor blast radius**
   posible y con una condición de aborto automática. No es apagar al azar.
 
-- **Herramientas:**
-  - **Chaos Mesh** o **LitmusChaos** (CNCF, nativos de K8s): pod-kill, latencia y
-    pérdida de red, DNS chaos, stress de CPU/mem/IO, time skew. Declarativos → van
-    en Git como los manifiestos.
-  - **AWS Fault Injection Service (FIS)** para lo de infraestructura: interrupción de
-    Spot, caída de una AZ, throttling de API.
+- **Dos variantes (Terraform elige substrato y motor de caos):**
+  - **A · Auto Mode + AWS FIS:** nodos Bottlerocket cerrados → caos gestionado con
+    contenedores efímeros (`aws:eks:pod-*`) + acciones de infra (Spot, AZ). No
+    requiere daemon privilegiado.
+  - **B · EC2 + Chaos Mesh:** nodos EC2 → caos in-cluster y declarativo (CRDs), con
+    daemon privilegiado que llega a red y kernel (incluye DNS/time chaos que FIS no
+    replica). En EC2 también puedes usar FIS.
+  - La **comparación** de los dos motores es en sí un entregable del lab.
 
 - **Escalera de experimentos** (de menor a mayor radio de impacto), cada uno con su
   hipótesis:
@@ -606,9 +608,11 @@ dependencias reales, para validar patrones de resiliencia.
   complejidad. Entra aquí solo si quieres contrastar resiliencia en el código vs en
   el mesh.
 
-Se monta sobre el cluster del lab 3 (Auto Mode) con la observabilidad del lab 12
-encendida. Iría en `eks/14-chaos-lab/`. **~3h.** No es CKA — es puro oficio de
-producción.
+Levanta su propio entorno con **Terraform** (una variable `substrate=automode|ec2`
+elige cluster y motor de caos), con la observabilidad del lab 12 encendida. Se corre
+una variante a la vez (dos clusters = doble costo). Guía completa en
+[`14-chaos-lab/`](14-chaos-lab/). **~1h de provisión + ~3h de experimentos por
+variante.** No es CKA — es puro oficio de producción.
 
 > **Nota de costo:** este nivel es un escalón más caro (más nodos, quizá RDS/
 > ElastiCache, FIS). Se puede abaratar con todo in-cluster y experimentos cortos,
