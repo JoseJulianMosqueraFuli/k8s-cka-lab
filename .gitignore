@@ -16,3 +16,27 @@ Thumbs.db
 # Temp
 *.tmp
 *.bak
+# Terraform
+**/.terraform/*
+.terraform/
+.terraform.tfstate.lock.info
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+# Variables (pueden traer secretos). Se conserva el ejemplo.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+# Planes guardados
+*.tfplan
+tfplan
+# Override files
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+# CLI config
+.terraformrc
+terraform.rc
+# Nota: .terraform.lock.hcl se DEJA versionado a propósito (reproducibilidad).
