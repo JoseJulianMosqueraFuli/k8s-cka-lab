@@ -2,7 +2,7 @@
 
 Ruta de práctica para entender EKS por capas, en tres niveles: **fundamentos**
 (levantar un cluster), **operación** (mantenerlo vivo) y **producción** (operarlo
-en equipo sin tocarlo a mano). Los labs 01-03 están hechos y verificados; del 04
+en equipo sin tocarlo a mano). Los labs 01-04 están hechos y verificados; del 05
 al 13 están diseñados como guías completas en el [roadmap](#roadmap).
 
 > Los labs son **guías, no manifiestos**: los archivos (manifests, políticas,
@@ -210,11 +210,11 @@ costo por hora de lo que encuentre para que sepas si urge.
 Los labs se organizan en tres niveles. Cada uno responde una pregunta distinta, y
 el salto entre niveles importa más que los labs individuales.
 
-| Nivel                     | Labs  | Pregunta                                      | Estado                        |
-| ------------------------- | ----- | --------------------------------------------- | ----------------------------- |
-| **1 · Fundamentos**       | 01-04 | ¿cómo levanto un cluster y expongo una app?   | 01-03 ✅ · 04-13 📋 guías listas |
-| **2 · Operación (día 2)** | 05-08 | ¿cómo lo mantengo vivo?                       | 📋 guías listas                |
-| **3 · Producción**        | 09-13 | ¿cómo lo operamos varios, sin tocarlo a mano? | 📋 guías listas                |
+| Nivel                     | Labs  | Pregunta                                      | Estado                           |
+| ------------------------- | ----- | --------------------------------------------- | -------------------------------- |
+| **1 · Fundamentos**       | 01-04 | ¿cómo levanto un cluster y expongo una app?   | 01-04 ✅ · 05-13 📋 guías listas |
+| **2 · Operación (día 2)** | 05-08 | ¿cómo lo mantengo vivo?                       | 📋 guías listas                  |
+| **3 · Producción**        | 09-13 | ¿cómo lo operamos varios, sin tocarlo a mano? | 📋 guías listas                  |
 
 El nivel 3 es el que separa "sé usar EKS" de "sé operar EKS en producción con un
 equipo". No cambia la tecnología, cambia el proceso.
