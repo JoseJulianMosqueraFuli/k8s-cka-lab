@@ -1,0 +1,13 @@
+# EKS Auto Mode: la configuracion especifica de AWS del ALB va aqui, NO como
+# anotaciones en el IngressClass. El scheme (internet-facing / internal), los
+# certificados ACM (spec.certificateARNs), subnets, tags, etc. se definen en
+# este objeto.
+apiVersion: eks.amazonaws.com/v1
+kind: IngressClassParams
+metadata:
+  name: alb
+spec:
+  scheme: internet-facing
+  # Para HTTPS con ACM (lab): descomenta y pon el/los ARN del certificado.
+  # certificateARNs:
+  #   - arn:aws:acm:us-east-1:<ACCOUNT_ID>:certificate/<CERT_ID>

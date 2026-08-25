@@ -1,0 +1,16 @@
+# EKS Auto Mode: el IngressClass usa el controlador integrado
+# `eks.amazonaws.com/alb` (NO `ingress.k8s.aws/alb` del controller standalone).
+# En Auto Mode NO existe un IngressClass "alb" por defecto: hay que crearlo.
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: alb
+  # Descomenta para que sea el IngressClass por defecto del cluster:
+  # annotations:
+  #   ingressclass.kubernetes.io/is-default-class: "true"
+spec:
+  controller: eks.amazonaws.com/alb
+  parameters:
+    apiGroup: eks.amazonaws.com
+    kind: IngressClassParams
+    name: alb
