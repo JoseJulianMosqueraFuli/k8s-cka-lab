@@ -3,11 +3,14 @@
 Ruta de práctica para entender EKS por capas, en tres niveles: **fundamentos**
 (levantar un cluster), **operación** (mantenerlo vivo) y **producción** (operarlo
 en equipo sin tocarlo a mano). Los labs 01-04 están hechos y verificados; del 05
-al 13 están diseñados como guías completas en el [roadmap](#roadmap).
+al 13 están diseñados como guías completas, y el 14 (caos) queda anotado como
+propuesta, en el [roadmap](#roadmap).
 
 > Los labs son **guías, no manifiestos**: los archivos (manifests, políticas,
 > Terraform, código Go) se escriben siguiendo los pasos del README. Los únicos
-> archivos que se entregan son los `destroy.sh`/`destroy.ps1` de cada lab.
+> archivos que se entregan son los `destroy.sh`/`destroy.ps1` de cada lab. (El lab
+> **04** es la excepción: sí entrega sus `manifests/`, el código Go de `app/` y el
+> `automode-cluster.yaml`, porque se ejecutó y validó de punta a punta.)
 
 Cada lab de nivel 1 levanta un cluster desde la consola de AWS, despliega nginx
 expuesto a internet, y lo destruye. La diferencia entre ellos es **quién gestiona
@@ -210,11 +213,12 @@ costo por hora de lo que encuentre para que sepas si urge.
 Los labs se organizan en tres niveles. Cada uno responde una pregunta distinta, y
 el salto entre niveles importa más que los labs individuales.
 
-| Nivel                     | Labs  | Pregunta                                      | Estado                           |
-| ------------------------- | ----- | --------------------------------------------- | -------------------------------- |
-| **1 · Fundamentos**       | 01-04 | ¿cómo levanto un cluster y expongo una app?   | 01-04 ✅ · 05-13 📋 guías listas |
-| **2 · Operación (día 2)** | 05-08 | ¿cómo lo mantengo vivo?                       | 📋 guías listas                  |
-| **3 · Producción**        | 09-13 | ¿cómo lo operamos varios, sin tocarlo a mano? | 📋 guías listas                  |
+| Nivel                      | Labs  | Pregunta                                                  | Estado                           |
+| -------------------------- | ----- | --------------------------------------------------------- | -------------------------------- |
+| **1 · Fundamentos**        | 01-04 | ¿cómo levanto un cluster y expongo una app?               | 01-04 ✅ · 05-13 📋 guías listas |
+| **2 · Operación (día 2)**  | 05-08 | ¿cómo lo mantengo vivo?                                   | 📋 guías listas                  |
+| **3 · Producción**         | 09-13 | ¿cómo lo operamos varios, sin tocarlo a mano?             | 📋 guías listas                  |
+| **4 · Resiliencia y caos** | 14    | ¿cómo se comporta el sistema cuando algo falla de verdad? | 🧪 propuesto (por diseñar)       |
 
 El nivel 3 es el que separa "sé usar EKS" de "sé operar EKS en producción con un
 equipo". No cambia la tecnología, cambia el proceso.
@@ -254,6 +258,14 @@ de Docker Hub. Nada de eso pasa en producción.
 
 Se monta sobre el cluster del lab 2 o 3. Conecta con `domains/03-services-networking`
 (20% del CKA). **~2h.**
+
+> **✅ Hecho (ago 2026).** Ejecutado end-to-end desde **CloudShell** sobre un cluster
+> **Auto Mode** (base lab 03) creado con `eksctl`. El Ingress usa la variante de Auto
+> Mode: `IngressClass` + `IngressClassParams` con controlador `eks.amazonaws.com/alb`
+> (el `certificate-arn` que se menciona arriba es del controller standalone; en Auto
+> Mode el cert va en `IngressClassParams.spec.certificateARNs`). Se validó también la
+> escalada con `hostNetwork` (el pod heredó el node role). **HTTPS con ACM quedó
+> pendiente** porque requiere un dominio propio.
 
 ---
 
@@ -527,6 +539,84 @@ cluster es una factura de EC2 sin desglose por equipo.
 
 ---
 
+## Nivel 4 · Resiliencia y caos
+
+El nivel 3 te deja operar el cluster con un equipo. Este nivel responde otra
+pregunta: cuando algo falla de verdad —y va a fallar— ¿el sistema se degrada con
+gracia o se cae en cascada? No se prueba con teoría, se prueba rompiendo a
+propósito y midiendo.
+
+> **Prerrequisito real:** este nivel solo significa algo si ya tienes SLOs definidos
+> (lab 12) y una app con varias dependencias desplegada por GitOps (lab 09). Sin un
+> estado estable medible, el caos es solo apagar cosas al azar.
+
+### 14 · Chaos engineering — romper un sistema real y medir la resiliencia
+
+**Pregunta:** ¿mi sistema sobrevive a una falla que no ensayé?
+
+A diferencia del lab 08 (que rompe piezas de infraestructura para practicar el
+diagnóstico), aquí se rompe con **hipótesis y método**, sobre una app con
+dependencias reales, para validar patrones de resiliencia.
+
+- **Una app con las cuatro dependencias que fallan distinto**, no un nginx:
+  - **síncrona** (servicio A llama a B y espera) → donde viven las cascadas
+  - **asíncrona** (cola + worker) → desacople y tolerancia
+  - **estado** (Postgres) → failover y atadura a una AZ (retoma el lab 06)
+  - **caché** (Redis) → degradación elegante vs fallo duro
+
+  Ejemplo que cabe en la palma de la mano: un **acortador de URLs con analítica**
+  (redirect síncrono y cacheado, conteo de clics asíncrono por cola). El path del
+  redirect es un SLI limpísimo para medir el estado estable.
+
+- **Primero los patrones de resiliencia, si no no hay nada que probar:** timeouts en
+  toda llamada de red, retries con backoff + jitter, circuit breaker, graceful
+  shutdown (SIGTERM + `preStop` + `terminationGracePeriodSeconds`), PDB,
+  `topologySpreadConstraints` entre AZs, y readiness que refleje las dependencias.
+
+- **El método (Principles of Chaos Engineering):** defines el estado estable (tu
+  SLI), formulas una hipótesis, inyectas el fallo con el **menor blast radius**
+  posible y con una condición de aborto automática. No es apagar al azar.
+
+- **Herramientas:**
+  - **Chaos Mesh** o **LitmusChaos** (CNCF, nativos de K8s): pod-kill, latencia y
+    pérdida de red, DNS chaos, stress de CPU/mem/IO, time skew. Declarativos → van
+    en Git como los manifiestos.
+  - **AWS Fault Injection Service (FIS)** para lo de infraestructura: interrupción de
+    Spot, caída de una AZ, throttling de API.
+
+- **Escalera de experimentos** (de menor a mayor radio de impacto), cada uno con su
+  hipótesis:
+  1. Matar un pod → ¿PDB respetado, SLI intacto?
+  2. Inyectar 500 ms entre dos servicios → ¿timeouts/retries o cascada? (el que más enseña)
+  3. Redis abajo → ¿degrada a DB o devuelve 500?
+  4. Matar al worker → ¿el redirect ni se entera? (async)
+  5. Failover de Postgres → connection pool y reintentos
+  6. DNS chaos (CoreDNS) → conecta directo con el lab 07
+  7. Spot interruption con FIS → ¿graceful shutdown salva los requests en vuelo?
+  8. Caída de una AZ con FIS → la prueba de fuego del multi-AZ (aterriza el lab 06)
+
+- **Game day:** correr la escalera con el equipo mirando dashboards, midiendo el
+  agotamiento del error budget. El entregable no es "rompimos cosas", es una lista
+  de debilidades encontradas y los patrones que las cerraron.
+
+- **(Opcional) Service mesh como compañero:** un mesh (Istio/Linkerd) da inyección de
+  fallos, reintentos y circuit breaking a nivel de infraestructura, más mTLS y
+  telemetría uniforme. Pero es una pieza pesada: como se dice en
+  [vacíos conscientes](#vacíos-conscientes), el lab 07 + 09 cubren el 80% con menos
+  complejidad. Entra aquí solo si quieres contrastar resiliencia en el código vs en
+  el mesh.
+
+Se monta sobre el cluster del lab 3 (Auto Mode) con la observabilidad del lab 12
+encendida. Iría en `eks/14-chaos-lab/`. **~3h.** No es CKA — es puro oficio de
+producción.
+
+> **Nota de costo:** este nivel es un escalón más caro (más nodos, quizá RDS/
+> ElastiCache, FIS). Se puede abaratar con todo in-cluster y experimentos cortos,
+> pero aplica la misma disciplina: límite de tiempo por experimento y
+> `verify-clean.sh` al final.
+
+---
+
 ## Vacíos conscientes
 
 Después de los 13 labs quedan temas sin cubrir. No son olvidos, son decisiones —
@@ -541,7 +631,7 @@ existe".
 | **Service mesh** (Istio, Linkerd)                                     | Complejidad alta y solo se justifica a cierta escala. Un mesh mal operado causa más incidentes de los que previene | Saber qué problema resuelve (mTLS, tráfico fino, telemetría) y que el lab 07 + 09 cubren el 80% con menos piezas |
 | **Runtime security** (GuardDuty EKS Protection, Falco)                | Se solapa con el lab 11 y encender GuardDuty en una cuenta de lab cuesta                                           | Fold-in opcional del lab 11                                                                                      |
 | **Windows nodes, GPU, ML**                                            | Nicho. GPU además es caro por hora                                                                                 | Solo si tu trabajo lo pide                                                                                       |
-| **Chaos engineering / game days**                                     | Necesita un sistema con SLOs ya definidos para que signifique algo                                                 | Cierre opcional del lab 08, después del 12                                                                       |
+| **Chaos engineering / game days**                                     | Necesita un sistema con SLOs ya definidos para que signifique algo                                                 | **Promovido a lab 14** (Nivel 4) — ver roadmap                                                                   |
 | **Compliance formal** (CIS Benchmark, PCI, SOC2)                      | Es un ejercicio de auditoría, no de ingeniería                                                                     | Fold-in del lab 11                                                                                               |
 | **Secrets externos** (External Secrets Operator, Secrets Manager CSI) | Cabe en el lab 05 como extensión natural de Pod Identity                                                           | Fold-in del lab 05                                                                                               |
 | **Backstage / portal interno**                                        | Es producto, no infraestructura. Solo tiene sentido con varios equipos consumiendo                                 | Leerlo si te toca plataforma                                                                                     |
