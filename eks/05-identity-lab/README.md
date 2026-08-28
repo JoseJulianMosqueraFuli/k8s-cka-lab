@@ -9,14 +9,20 @@ lado a lado: qué escribes, qué se rompe, qué es más fácil de auditar.
 Además, configuras Access Entries para gestionar quién puede usar `kubectl` contra
 el cluster — el reemplazo del infame `aws-auth` ConfigMap.
 
+Y cierras con la otra mitad del problema de identidad: IRSA y Pod Identity dan
+credenciales **de AWS**, pero tu app también necesita un password de base de datos.
+Ahí entra External Secrets Operator, sincronizando desde Secrets Manager sin que el
+valor pase nunca por Git.
+
 **Se monta sobre:** el cluster del lab 02 (EC2).
-**Costo estimado adicional:** ~$0.01/hr (S3 negligible, no hay infra nueva)
-**Tiempo:** ~1h 30m
+**Costo estimado adicional:** ~$0.01/hr (S3 negligible; Secrets Manager ~$0.40/mes por secreto)
+**Tiempo:** ~2h 15m
 
 **Herramientas necesarias:**
 
 - AWS CLI v2
 - kubectl
+- helm (para External Secrets Operator, Paso 9)
 - La imagen `identity-api` del lab 04 ya en ECR
 
 **Conexión CKA:** `domains/01-cluster-architecture` — RBAC, ServiceAccounts (25% del examen)
@@ -26,6 +32,7 @@ el cluster — el reemplazo del infame `aws-auth` ConfigMap.
 ## Qué vas a construir
 
 ```
+── Identidad del pod hacia AWS (Pasos 3 y 4) ──────────────────────────
 Pod (identity-api)
   ├─ ServiceAccount con anotación (IRSA)     → AssumeRoleWithWebIdentity → IAM Role → S3
   └─ ServiceAccount con asociación (Pod Identity) → AssumeRole → IAM Role → S3
@@ -33,6 +40,18 @@ Pod (identity-api)
 Bucket S3
   └─ lab-data/
        └─ secret.txt   ← el pod lo lee y devuelve el contenido
+
+── Identidad humana hacia el cluster (Paso 8) ─────────────────────────
+Rol IAM → Access Entry + access policy → permisos de kubectl
+
+── Valores secretos hacia el pod (Paso 9) ─────────────────────────────
+AWS Secrets Manager
+      ↑ lee (Pod Identity sobre el SA del operator)
+External Secrets Operator
+      ↓ crea y refresca
+Secret de Kubernetes → envFrom → Pod
+
+   El ExternalSecret es un puntero: sí va a Git. El valor, nunca.
 ```
 
 ---
@@ -564,16 +583,306 @@ aws eks associate-access-policy \
 
 ---
 
+## Paso 9: Secrets externos — External Secrets Operator
+
+### El problema que los pasos 3 y 4 no resolvieron
+
+IRSA y Pod Identity le dieron al pod credenciales **de AWS**, para que llame a la
+API de AWS. Pero tu app casi siempre necesita otra cosa: un password de Postgres,
+un token de un proveedor, una API key. Eso no es una credencial de AWS, es un valor
+que la app lee de una variable de entorno o de un archivo.
+
+La respuesta ingenua es un Secret de Kubernetes. El problema es doble:
+
+- **Un Secret de Kubernetes no está cifrado, está en base64.** Cualquiera con
+  permiso de lectura sobre el namespace lo ve en claro con un `base64 -d`.
+- **No puede vivir en Git.** Y desde el lab 09, el repo es la fuente de verdad de
+  todo lo demás. Un Secret es exactamente el recurso que rompe ese modelo.
+
+Conviene separar tres cosas que se confunden todo el tiempo:
+
+| Pregunta                                 | Respuesta                | Dónde está en estos labs |
+| ---------------------------------------- | ------------------------ | ------------------------ |
+| ¿Cómo llama mi pod a la API de AWS?      | IRSA / Pod Identity      | Pasos 3 y 4              |
+| ¿De dónde sale el valor del password?    | Secrets Manager + ESO    | Este paso                |
+| ¿Está cifrado ese Secret dentro de etcd? | Cifrado de sobre con KMS | Lab 11, Paso 8           |
+
+Las tres son necesarias y ninguna reemplaza a otra. El cifrado con KMS del lab 11
+protege el Secret en reposo; no dice nada sobre de dónde salió el valor ni sobre
+quién lo puso ahí.
+
+### 9.1 Guardar el secreto en Secrets Manager
+
+```bash
+SECRET_NAME=k8s-lab/identity-api/db
+
+aws secretsmanager create-secret \
+  --name $SECRET_NAME \
+  --description "Credenciales de la DB para identity-api (lab 05)" \
+  --secret-string '{"username":"identity","password":"c4mbi4me-3sto"}' \
+  --region $REGION
+
+SECRET_ARN=$(aws secretsmanager describe-secret \
+  --secret-id $SECRET_NAME --region $REGION \
+  --query ARN --output text)
+
+echo "Secret ARN: $SECRET_ARN"
+```
+
+### 9.2 Policy e identidad para el operator
+
+El operator es el que lee de Secrets Manager, así que **el operator** es quien
+necesita la identidad. Mismo patrón del Paso 4, aplicado a un componente de
+plataforma en vez de a tu app.
+
+```bash
+ROLE_ESO=eks-lab-external-secrets
+
+cat > eso-policy.json <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:DescribeSecret"
+      ],
+      "Resource": "${SECRET_ARN}"
+    }
+  ]
+}
+EOF
+
+POLICY_ESO_ARN=$(aws iam create-policy \
+  --policy-name eks-lab-eso-read \
+  --policy-document file://eso-policy.json \
+  --query 'Policy.Arn' --output text)
+
+# Misma trust policy de Pod Identity del Paso 4.2
+aws iam create-role \
+  --role-name $ROLE_ESO \
+  --assume-role-policy-document file://trust-policy-podid.json
+
+aws iam attach-role-policy \
+  --role-name $ROLE_ESO \
+  --policy-arn $POLICY_ESO_ARN
+```
+
+Fíjate en el `Resource`: es el ARN de **un** secreto, no `secretsmanager:*`. Es el
+mismo criterio del Paso 2 aplicado a otro servicio. Un operator con
+`secretsmanager:GetSecretValue` sobre `*` es una llave maestra de toda la cuenta
+corriendo como pod.
+
+### 9.3 Instalar el operator y asociar la identidad
+
+```bash
+helm repo add external-secrets https://charts.external-secrets.io
+helm repo update
+
+helm install external-secrets external-secrets/external-secrets \
+  -n external-secrets --create-namespace \
+  --set installCRDs=true
+
+kubectl wait --for=condition=Ready pods --all \
+  -n external-secrets --timeout=120s
+
+# La asociación va sobre el SA del operator, no sobre el SA de tu app
+aws eks create-pod-identity-association \
+  --cluster-name $CLUSTER_NAME \
+  --namespace external-secrets \
+  --service-account external-secrets \
+  --role-arn arn:aws:iam::${ACCOUNT_ID}:role/${ROLE_ESO} \
+  --region $REGION
+
+# Reiniciar para que tome las credenciales de la asociación
+kubectl rollout restart deploy external-secrets -n external-secrets
+```
+
+Ese `rollout restart` es el detalle que hace perder media hora: la asociación de
+Pod Identity se inyecta cuando el pod arranca. Si asocias después de instalar, los
+pods existentes siguen sin credenciales y el error que ves es un `AccessDenied` que
+parece de IAM y es de ciclo de vida.
+
+### 9.4 ClusterSecretStore: cómo se llega al proveedor
+
+```yaml
+# manifests/cluster-secret-store.yaml
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata:
+  name: aws-secretsmanager
+spec:
+  provider:
+    aws:
+      service: SecretsManager
+      region: us-east-1
+      # Sin bloque `auth`: el operator usa la cadena de credenciales del SDK,
+      # que es justo lo que le dio Pod Identity en el paso anterior.
+```
+
+Decisión de diseño que conviene tomar a conciencia: un `ClusterSecretStore` usa la
+identidad del operator para **todo el cluster**. Cómodo en un lab, grueso en
+producción con varios equipos — cualquier namespace que pueda crear un
+`ExternalSecret` puede leer todo lo que el rol del operator alcance. La alternativa
+es un `SecretStore` (namespaced) por equipo, con su propio rol. Es el mismo
+razonamiento de blast radius del Paso 4, un nivel más arriba.
+
+### 9.5 ExternalSecret: el objeto que sí vive en Git
+
+```yaml
+# manifests/external-secret.yaml
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: identity-api-db
+  namespace: apps
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-secretsmanager
+    kind: ClusterSecretStore
+  target:
+    name: identity-api-db # el Secret de Kubernetes que va a crear
+    creationPolicy: Owner
+  data:
+    - secretKey: DB_USER
+      remoteRef:
+        key: k8s-lab/identity-api/db
+        property: username
+    - secretKey: DB_PASSWORD
+      remoteRef:
+        key: k8s-lab/identity-api/db
+        property: password
+```
+
+```bash
+kubectl apply -f manifests/cluster-secret-store.yaml
+kubectl apply -f manifests/external-secret.yaml
+
+# Verificar que sincronizó
+kubectl get externalsecret identity-api-db -n apps
+# NAME              STORE                REFRESH INTERVAL   STATUS         READY
+# identity-api-db   aws-secretsmanager   1h                 SecretSynced   True
+
+# El Secret existe, y ESO lo creó
+kubectl get secret identity-api-db -n apps
+kubectl get secret identity-api-db -n apps \
+  -o jsonpath='{.data.DB_USER}' | base64 -d; echo
+```
+
+**Este es el punto del paso.** El `ExternalSecret` es un puntero: dice _dónde_ está
+el valor, no _cuál_ es. Se puede commitear sin miedo, revisar en un PR y sincronizar
+con Argo CD. El valor nunca pasa por Git.
+
+Consumirlo desde el Deployment es lo de siempre, porque el resultado es un Secret
+normal:
+
+```yaml
+envFrom:
+  - secretRef:
+      name: identity-api-db
+```
+
+### 9.6 Rotación: el detalle que casi nadie prueba
+
+```bash
+# Rotar el valor en Secrets Manager
+aws secretsmanager put-secret-value \
+  --secret-id $SECRET_NAME \
+  --secret-string '{"username":"identity","password":"rotado-en-vivo"}' \
+  --region $REGION
+
+# Forzar la sincronización sin esperar el refreshInterval
+kubectl annotate externalsecret identity-api-db -n apps \
+  force-sync=$(date +%s) --overwrite
+
+# El Secret de Kubernetes ya tiene el valor nuevo
+kubectl get secret identity-api-db -n apps \
+  -o jsonpath='{.data.DB_PASSWORD}' | base64 -d; echo
+```
+
+Ahora la parte incómoda: **el pod que ya estaba corriendo sigue con el password
+viejo.** Las variables de entorno se resuelven una vez, al arrancar el contenedor.
+Rotar el secreto en el origen no reinicia nada.
+
+| Forma de consumir el Secret | ¿Se actualiza en un pod vivo?                    |
+| --------------------------- | ------------------------------------------------ |
+| `envFrom` / `env`           | No. Requiere reiniciar el pod                    |
+| Volumen montado             | Sí, el kubelet refresca el archivo (con retraso) |
+
+Las dos salidas honestas: montar el secreto como volumen y que la app relea el
+archivo, o disparar un reinicio cuando rota (con
+[Reloader](https://github.com/stakater/Reloader) o con el truco del checksum en el
+pod template). Elegir "variable de entorno + rotación automática" sin hacer nada de
+esto es tener rotación en el papel y no en el sistema.
+
+### 9.7 La alternativa: Secrets Store CSI Driver
+
+Existe un segundo camino que **no crea un Secret de Kubernetes**: el driver monta el
+valor directamente como archivo en el pod.
+
+```bash
+helm repo add secrets-store-csi-driver \
+  https://kubernetes-sigs.github.io/secrets-store-csi-driver/charts
+helm install csi-secrets-store secrets-store-csi-driver/secrets-store-csi-driver \
+  -n kube-system
+
+# El provider de AWS va aparte del driver
+kubectl apply -f https://raw.githubusercontent.com/aws/secrets-store-csi-driver-provider-aws/main/deployment/aws-provider-installer.yaml
+```
+
+| Aspecto                          | External Secrets Operator                  | Secrets Store CSI Driver              |
+| -------------------------------- | ------------------------------------------ | ------------------------------------- |
+| Qué produce                      | Un Secret de Kubernetes                    | Un archivo montado en el pod          |
+| ¿El valor queda en etcd?         | Sí (cifrado con KMS si lo activas)         | No, salvo que pidas `secretObjects`   |
+| Consumo con `envFrom`            | Directo                                    | Requiere sincronizar a un Secret      |
+| Funciona sin que el pod arranque | Sí, el Secret existe aparte                | No, se materializa al montar          |
+| Alcance                          | Cualquier consumidor del Secret            | Solo el pod que lo monta              |
+| Encaja con GitOps                | Muy bien (el ExternalSecret es un puntero) | Bien (el SecretProviderClass también) |
+
+La regla práctica: **ESO si varios consumidores necesitan el valor o si quieres el
+modelo declarativo en Git; CSI Driver si el requisito es que el secreto no toque
+etcd.** Ese último requisito suele venir de auditoría, no de ingeniería, y es
+legítimo igual.
+
+### 9.8 Rompe cosas a propósito
+
+```bash
+# Apuntar a un secreto que no existe
+kubectl patch externalsecret identity-api-db -n apps --type=merge -p \
+  '{"spec":{"data":[{"secretKey":"DB_USER","remoteRef":{"key":"no-existe","property":"username"}}]}}'
+
+kubectl get externalsecret identity-api-db -n apps
+# STATUS: SecretSyncedError
+
+kubectl describe externalsecret identity-api-db -n apps | tail -20
+# Events: ... could not get secret data from provider ... ResourceNotFoundException
+```
+
+Lo que enseña: el `ExternalSecret` falla **sin borrar el Secret que ya existía**.
+La app sigue corriendo con el último valor bueno. Es degradación elegante, y es la
+razón de que un fallo de Secrets Manager no tumbe el cluster entero. También es la
+razón de que un `ExternalSecret` roto pueda pasar semanas sin que nadie note — hay
+que alertar sobre su estado, no asumir que si la app corre está todo bien.
+
+---
+
 ## Troubleshooting
 
-| Síntoma                                | Causa probable                                  | Fix                                                          |
-| -------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------ |
-| `AccessDenied` en STS                  | Trust policy `sub` no coincide                  | Verificar namespace y nombre del SA exacto                   |
-| `/s3` da AccessDenied pero `/identity` funciona | La policy `s3-read-policy.json` no cubre el bucket/prefix | Revisar `Resource` y la condición `s3:prefix`     |
-| Pod no tiene variables `AWS_*`         | ServiceAccount sin anotación (IRSA)             | Agregar `eks.amazonaws.com/role-arn`                         |
-| `could not get token` con Pod Identity | Add-on no instalado                             | `aws eks describe-addon --addon-name eks-pod-identity-agent` |
-| Credenciales del nodo en vez del rol   | `hostNetwork: true` o IMDS hop limit incorrecto | Verificar spec del pod y node metadata options               |
-| "the server has asked for credentials" | Access Entry faltante para tu usuario IAM       | `aws eks list-access-entries --cluster-name ...`             |
+| Síntoma                                                                 | Causa probable                                                | Fix                                                                   |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `AccessDenied` en STS                                                   | Trust policy `sub` no coincide                                | Verificar namespace y nombre del SA exacto                            |
+| `/s3` da AccessDenied pero `/identity` funciona                         | La policy `s3-read-policy.json` no cubre el bucket/prefix     | Revisar `Resource` y la condición `s3:prefix`                         |
+| Pod no tiene variables `AWS_*`                                          | ServiceAccount sin anotación (IRSA)                           | Agregar `eks.amazonaws.com/role-arn`                                  |
+| `could not get token` con Pod Identity                                  | Add-on no instalado                                           | `aws eks describe-addon --addon-name eks-pod-identity-agent`          |
+| Credenciales del nodo en vez del rol                                    | `hostNetwork: true` o IMDS hop limit incorrecto               | Verificar spec del pod y node metadata options                        |
+| "the server has asked for credentials"                                  | Access Entry faltante para tu usuario IAM                     | `aws eks list-access-entries --cluster-name ...`                      |
+| `ExternalSecret` en `SecretSyncedError` con `AccessDenied`              | La asociación de Pod Identity se creó después de instalar ESO | `kubectl rollout restart deploy external-secrets -n external-secrets` |
+| `ExternalSecret` en `SecretSyncedError` con `ResourceNotFoundException` | El `remoteRef.key` no coincide con el nombre real             | `aws secretsmanager list-secrets --query 'SecretList[].Name'`         |
+| El Secret se creó pero viene vacío                                      | El `property` no existe en el JSON del secreto                | Inspeccionar con `aws secretsmanager get-secret-value`                |
+| Roté el secreto y la app sigue con el viejo                             | Las env vars se resuelven al arrancar el contenedor           | Montar como volumen o reiniciar el pod (Paso 9.6)                     |
+| `no matches for kind "ExternalSecret"`                                  | Las CRDs no se instalaron                                     | `helm upgrade ... --set installCRDs=true`                             |
 
 ---
 
@@ -583,6 +892,35 @@ aws eks associate-access-policy \
 # Kubernetes
 kubectl delete -f manifests/
 kubectl delete namespace apps 2>/dev/null
+
+# External Secrets Operator (Paso 9)
+kubectl delete externalsecret --all -A 2>/dev/null
+kubectl delete clustersecretstore aws-secretsmanager 2>/dev/null
+helm uninstall external-secrets -n external-secrets 2>/dev/null
+kubectl delete namespace external-secrets 2>/dev/null
+
+# Secrets Store CSI Driver, si probaste el Paso 9.7
+helm uninstall csi-secrets-store -n kube-system 2>/dev/null
+
+# Asociación de Pod Identity del operator
+aws eks delete-pod-identity-association \
+  --cluster-name $CLUSTER_NAME \
+  --association-id $(aws eks list-pod-identity-associations \
+    --cluster-name $CLUSTER_NAME --namespace external-secrets --region $REGION \
+    --query "associations[0].associationId" --output text) \
+  --region $REGION 2>/dev/null
+
+# Rol y policy del operator
+aws iam detach-role-policy --role-name $ROLE_ESO --policy-arn $POLICY_ESO_ARN
+aws iam delete-role --role-name $ROLE_ESO
+aws iam delete-policy --policy-arn $POLICY_ESO_ARN
+
+# El secreto. Sin --force-delete-without-recovery queda 30 días en "scheduled
+# for deletion" y sigue ocupando el nombre y cobrando
+aws secretsmanager delete-secret \
+  --secret-id $SECRET_NAME \
+  --force-delete-without-recovery \
+  --region $REGION
 
 # Asociación Pod Identity
 aws eks delete-pod-identity-association \
@@ -632,3 +970,19 @@ aws eks delete-addon --cluster-name $CLUSTER_NAME \
 5. **Aprender a leer errores STS es más valioso que memorizar comandos.** El
    mensaje `AccessDenied` + el contexto del trust te dice exactamente qué
    condición falló. Es debugging real.
+
+6. **"Identidad" son dos problemas distintos, no uno.** IRSA y Pod Identity
+   responden _cómo llamo a la API de AWS_. External Secrets responde _de dónde sale
+   el password_. Y el cifrado con KMS del lab 11 responde _cómo se guarda_. Mezclar
+   las tres es lo que produce arquitecturas donde el secreto está cifrado en etcd
+   pero commiteado en el repo.
+
+7. **El objeto que va a Git es el puntero, no el valor.** Un `ExternalSecret` dice
+   dónde vive el secreto y qué forma tiene. Se revisa en un PR, se sincroniza con
+   Argo CD y no filtra nada. Es lo que hace compatibles "todo declarativo en Git" y
+   "los secretos no van en Git".
+
+8. **Rotar en el origen no rota en el pod.** Una variable de entorno se resuelve una
+   vez, al arrancar el contenedor. Si la rotación no dispara un reinicio o la app no
+   relee un archivo montado, tienes rotación en el papel y el password viejo en
+   memoria. Es el tipo de detalle que solo aparece si lo pruebas.

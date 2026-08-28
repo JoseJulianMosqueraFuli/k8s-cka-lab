@@ -32,11 +32,14 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            # El webhook de IRSA inyecta AWS_ROLE_ARN y AWS_WEB_IDENTITY_TOKEN_FILE,
-            # pero NO la region. Sin esto el SDK falla con "Missing Region" antes
-            # de siquiera intentar el AssumeRoleWithWebIdentity (lo vimos en el lab 04).
-            - name: AWS_REGION
-              value: us-east-1
+            # NO hace falta declarar AWS_REGION: el mutating webhook de EKS inyecta
+            # AWS_REGION, AWS_DEFAULT_REGION, AWS_STS_REGIONAL_ENDPOINTS, AWS_ROLE_ARN
+            # y AWS_WEB_IDENTITY_TOKEN_FILE al detectar la anotacion del SA.
+            # (Verificado en 1.36 / Auto Mode con:
+            #  kubectl get pod -n apps -l app=identity-api-irsa \
+            #    -o jsonpath='{range .items[0].spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}')
+            # El "Missing Region" del lab 04 era otro camino: hostNetwork + IMDS,
+            # sin webhook de por medio, asi que nadie ponia la region.
             - name: S3_BUCKET
               value: <TU_BUCKET>
             - name: S3_KEY

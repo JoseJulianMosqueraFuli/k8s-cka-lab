@@ -32,10 +32,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            # Pod Identity inyecta AWS_CONTAINER_CREDENTIALS_FULL_URI y el token,
-            # tampoco la region. Mismo motivo que en deploy-irsa.yaml.
-            - name: AWS_REGION
-              value: us-east-1
+            # Tampoco hace falta AWS_REGION. Pod Identity inyecta:
+            #   AWS_CONTAINER_CREDENTIALS_FULL_URI=http://169.254.170.23/v1/credentials
+            #   AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE=/var/run/secrets/pods.eks.amazonaws.com/...
+            #   AWS_REGION, AWS_DEFAULT_REGION, AWS_STS_REGIONAL_ENDPOINTS
+            # Verificado en 1.36 / Auto Mode. Compara con deploy-irsa.yaml: alli el
+            # SDK lee un TOKEN de disco y lo cambia en STS; aqui consulta una URL
+            # link-local del agente. Mismo resultado, mecanismos distintos.
             - name: S3_BUCKET
               value: <TU_BUCKET>
             - name: S3_KEY
