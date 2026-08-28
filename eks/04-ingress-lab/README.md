@@ -10,17 +10,26 @@ Este lab cierra el hueco más grande del nivel 1: los labs 01-03 terminan con un
 NLB en capa 4, HTTP plano, y una imagen pública de Docker Hub. Nada de eso pasa en
 producción.
 
+Cierra con dos temas de exposición que sí se usan y casi nunca se practican:
+**cert-manager** para el TLS que ACM no cubre (entre pods, webhooks, mTLS) y
+**Gateway API**, el sucesor oficial de Ingress.
+
 **Se monta sobre:** el cluster del lab 02 (EC2) o 03 (Auto Mode).
 **Costo estimado adicional:** ~$0.03/hr (ALB $0.0225 + ECR negligible)
-**Tiempo:** ~2h
+**Tiempo:** ~3h
 
 **Herramientas necesarias:**
 
 - Docker (para construir la imagen)
 - AWS CLI v2
 - kubectl
+- helm (para cert-manager en el Paso 5, Opción C)
 - Go 1.22+ (para `go mod tidy`; o puedes saltar este paso y dejar que Docker baje las dependencias)
 - El AWS Load Balancer Controller ya instalado (lab 01, paso 8) o integrado (lab 03 Auto Mode)
+
+> **Ojo con el Paso 8 (Gateway API) en Auto Mode:** el balanceador integrado de Auto
+> Mode no implementa Gateway API. Ese paso necesita el LB Controller standalone, o
+> sea un cluster del lab 02. Está señalado en el propio paso.
 
 > **Importante:** si vienes del lab 02 (EC2), tu cluster **no** tiene el AWS LB
 > Controller instalado — el lab 02 solo usa el cloud-controller-manager que crea
@@ -674,6 +683,148 @@ Esperar ~2-5 min hasta que el status sea `Issued`.
 Salta este paso. El Ingress funcionará sin HTTPS (solo HTTP). En la anotación del
 paso 6, omite `certificate-arn` y `ssl-redirect`.
 
+### Opción C: cert-manager — el otro TLS, el de adentro
+
+> **📋 No ejecutado.** Esta subsección y el Paso 8 (Gateway API) son las dos partes
+> de este lab que **no** se validaron end-to-end. El resto del README sí. Lo digo
+> explícito para que no confundas lo comprobado con lo escrito.
+
+ACM resuelve **un** problema de TLS: el del borde. El certificado vive en el ALB, el
+handshake termina ahí, y del ALB al pod el tráfico va en HTTP plano por la red del
+VPC. Para exponer una app a internet eso alcanza y es lo correcto.
+
+Lo que ACM no resuelve:
+
+- **TLS entre servicios dentro del cluster.** Servicio A llama a B; si el requisito
+  es que ese salto vaya cifrado, ACM no participa.
+- **Certificados de webhooks.** Todo admission controller necesita servir HTTPS con
+  un cert que el API server confíe. Kyverno (lab 11) y KEDA (lab 06) traen su propia
+  gestión precisamente porque este problema existe.
+- **mTLS**, donde cliente y servidor se autentican con certificado.
+
+El modelo de ACM es que el certificado vive en el balanceador de AWS y TLS termina
+ahí. Meter el material de la clave dentro de un pod no es para lo que está pensado.
+Para eso está cert-manager, que emite certificados **como recursos de Kubernetes**.
+
+```bash
+helm repo add jetstack https://charts.jetstack.io
+helm repo update
+
+helm install cert-manager jetstack/cert-manager \
+  -n cert-manager --create-namespace \
+  --set crds.enabled=true
+
+kubectl wait --for=condition=Ready pods --all -n cert-manager --timeout=120s
+```
+
+**Un CA interno** para el tráfico entre servicios. No lo valida ningún navegador, y
+no hace falta: los que se validan entre sí son tus pods.
+
+```yaml
+# manifests/cert-manager-internal.yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-root
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: internal-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: lab-internal-ca
+  secretName: internal-ca-secret
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: selfsigned-root
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: internal-ca-issuer
+spec:
+  ca:
+    secretName: internal-ca-secret
+---
+# El certificado que consume tu app
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: identity-api-tls
+  namespace: apps
+spec:
+  secretName: identity-api-tls # cert-manager crea y renueva este Secret
+  dnsNames:
+    - identity-api.apps.svc.cluster.local
+  issuerRef:
+    name: internal-ca-issuer
+    kind: ClusterIssuer
+```
+
+```bash
+kubectl apply -f manifests/cert-manager-internal.yaml
+
+kubectl get certificate -n apps
+# NAME               READY   SECRET             AGE
+# identity-api-tls   True    identity-api-tls   20s
+```
+
+Ese Secret se monta como volumen en el pod y la app sirve HTTPS con él. Lo que hace
+distinto a cert-manager de generar el cert a mano con `openssl`: **lo renueva solo**
+antes de que expire. Un certificado vencido en producción es un incidente clásico y
+completamente evitable.
+
+**Con un dominio real y Let's Encrypt** (la alternativa gratuita a ACM, y la que
+sirve si el certificado tiene que salir del ALB):
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: tu@email.com
+    privateKeySecretRef:
+      name: letsencrypt-prod-account
+    solvers:
+      - dns01:
+          route53:
+            region: us-east-1
+            # Sin credenciales: usa la identidad del pod de cert-manager,
+            # asociada con Pod Identity igual que en el lab 05
+```
+
+El solver DNS-01 necesita que cert-manager pueda escribir en tu zona de Route 53:
+`route53:ChangeResourceRecordSets`, `route53:ListHostedZonesByName` y
+`route53:GetChange`. Es el mismo patrón de Pod Identity del lab 05, aplicado a otro
+componente de plataforma. Y conviene acotar el `Resource` a la zona hospedada
+concreta: un cert-manager con permiso sobre todas tus zonas DNS es una llave para
+secuestrar cualquier dominio de la cuenta.
+
+**Cuándo usar cuál:**
+
+| Necesidad                                 | Herramienta                                |
+| ----------------------------------------- | ------------------------------------------ |
+| HTTPS público terminado en el ALB/NLB     | ACM (Opción A). Gratis y sin operar nada   |
+| HTTPS público sin usar ACM, o multi-cloud | cert-manager + Let's Encrypt               |
+| TLS entre pods dentro del cluster         | cert-manager con un CA interno             |
+| mTLS entre servicios                      | cert-manager, o un service mesh            |
+| Certificados de webhooks de un operator   | cert-manager (o el que traiga el operator) |
+
+La regla corta: **en EKS, ACM para el borde y cert-manager para adentro.** Se usan
+juntos y no compiten. Si terminas eligiendo un service mesh (lo que el
+[readme del roadmap](../readme.md#vacíos-conscientes) descarta a propósito), el mesh
+suele traer su propia emisión de certificados y ahí sí se solapa.
+
 ---
 
 ## Paso 6: Crear el Ingress (ALB)
@@ -815,7 +966,236 @@ El pod no tiene credenciales AWS, porque:
 
 ---
 
-## Paso 8: (Opcional) Probar la escalada con hostNetwork
+## Paso 8: Gateway API — el sucesor de Ingress
+
+> **📋 No ejecutado.** Igual que la Opción C del Paso 5. Los manifiestos siguen la
+> documentación del controller, pero no los corrí en un cluster. El resto del lab sí
+> está validado end-to-end.
+
+### El problema de Ingress que las anotaciones dejan a la vista
+
+Mira otra vez el Ingress del Paso 6. Lo que define su comportamiento real no está en
+el `spec`, está en las anotaciones: `alb.ingress.kubernetes.io/scheme`,
+`target-type`, `healthcheck-path`, `ssl-redirect`. El `spec` de Ingress solo sabe de
+hosts, paths y servicios.
+
+Eso tiene tres consecuencias:
+
+- **No es portable.** Ese Ingress no funciona igual en GKE ni con NGINX. Cambias de
+  entorno y reescribes todas las anotaciones.
+- **No se valida.** Una anotación mal escrita es un string que nadie revisa. No hay
+  error: simplemente no pasa nada, y lo descubres cuando el health check falla.
+- **No se puede dividir por roles.** El Ingress es un solo objeto donde conviven la
+  configuración de infraestructura (esquema del LB, certificados, subredes) y el
+  ruteo de la app. Quien puede editar el ruteo puede editar la infraestructura.
+
+Ingress está **congelado** en Kubernetes: recibe correcciones, no funcionalidad
+nueva. Gateway API es el reemplazo oficial, y su aporte central es separar ese objeto
+único en tres, por responsabilidad:
+
+```
+GatewayClass   ← lo define quien provee la infra (AWS, vía el controller)
+     ↑
+  Gateway      ← lo define el equipo de plataforma: puertos, TLS, esquema del LB
+     ↑
+ HTTPRoute     ← lo define el equipo de la app: paths, headers, pesos, backends
+```
+
+El equipo de la app crea `HTTPRoute` en su namespace y no puede tocar el `Gateway`.
+Con RBAC eso deja de ser una convención y pasa a ser una frontera real — la misma
+idea de "el namespace como frontera" del lab 07, aplicada al tráfico de entrada.
+
+### Paso 8.1: Requisitos, y el detalle que rompe este lab
+
+**Aviso importante para este lab en particular:** el walkthrough de arriba corre
+sobre **EKS Auto Mode**, y el balanceador integrado de Auto Mode
+(`eks.amazonaws.com/alb`) **no implementa Gateway API**. Si estás en Auto Mode tienes
+dos salidas: instalar el AWS Load Balancer Controller standalone junto al integrado,
+o usar un implementador in-cluster como Envoy Gateway. En un cluster del **lab 02
+(EC2)** con el LBC standalone, esto funciona directo.
+
+Soporte del LBC, según su documentación:
+
+| Capa | Rutas                              | LB resultante | Versión mínima del LBC |
+| ---- | ---------------------------------- | ------------- | ---------------------- |
+| L7   | `HTTPRoute`, `GRPCRoute`           | ALB           | >= 2.14.0              |
+| L4   | `TCPRoute`, `UDPRoute`, `TLSRoute` | NLB           | >= 2.13.3              |
+
+El soporte es **GA desde la v3.0.0** del controller. Instalación:
+
+```bash
+# 1. CRDs estándar de Gateway API (el LBC está construido contra la v1.3.0)
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.3.0/standard-install.yaml
+
+# 2. CRDs propias del LBC para Gateway
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/config/crd/gateway/gateway-crds.yaml
+
+# 3. Los feature gates: por defecto el LBC IGNORA los objetos de Gateway API
+helm upgrade aws-load-balancer-controller eks/aws-load-balancer-controller \
+  -n kube-system --reuse-values \
+  --set controllerConfig.featureGates.ALBGatewayAPI=true \
+  --set controllerConfig.featureGates.NLBGatewayAPI=true
+```
+
+Dos trampas de operación que vale anotar antes de tocarlo:
+
+- **Los feature gates son opt-in.** Sin `ALBGatewayAPI=true` puedes aplicar un
+  `Gateway` perfecto y no pasa absolutamente nada. No hay error, no hay evento: el
+  controller no está mirando esos objetos.
+- **Las CRDs se actualizan antes que el controller**, no después. El proyecto avisa
+  que si subes el controller primero, el soporte de rutas L4 se desactiva solo hasta
+  que las CRDs estén al día. Es justo el tipo de orden que el lab 10 (upgrades)
+  insiste en guionar.
+
+### Paso 8.2: Los tres objetos
+
+```yaml
+# manifests/gatewayclass.yaml — normalmente lo crea una vez el equipo de plataforma
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: alb
+spec:
+  controllerName: gateway.k8s.aws/alb # para NLB/L4 sería gateway.k8s.aws/nlb
+```
+
+```yaml
+# manifests/gateway.yaml — el equipo de plataforma
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: lab-gateway
+  namespace: apps
+spec:
+  gatewayClassName: alb
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same # qué namespaces pueden colgar rutas de este Gateway
+```
+
+```yaml
+# manifests/httproute.yaml — el equipo de la app
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: identity-api
+  namespace: apps
+spec:
+  parentRefs:
+    - name: lab-gateway
+      sectionName: http # el listener concreto del Gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /identity
+      backendRefs:
+        - name: identity-api
+          port: 80
+```
+
+```bash
+kubectl apply -f manifests/gatewayclass.yaml
+kubectl apply -f manifests/gateway.yaml
+kubectl apply -f manifests/httproute.yaml
+
+# El ALB tarda lo mismo que con Ingress
+kubectl get gateway lab-gateway -n apps
+# NAME          CLASS   ADDRESS                                  PROGRAMMED
+# lab-gateway   alb     k8s-apps-labgatew-xxxx.us-east-1.elb...  True
+
+# Si PROGRAMMED no pasa a True, el estado dice por qué
+kubectl describe gateway lab-gateway -n apps
+kubectl describe httproute identity-api -n apps
+```
+
+Ese `PROGRAMMED: True` es otra mejora concreta sobre Ingress: el estado del objeto
+te dice si el balanceador quedó configurado y, si no, cuál condición falló. Con
+Ingress el diagnóstico era leer los logs del controller.
+
+### Paso 8.3: Lo que Ingress no podía hacer
+
+**Repartir tráfico por peso**, como campo tipado del API y no como anotación de un
+vendor:
+
+```yaml
+rules:
+  - matches:
+      - path:
+          type: PathPrefix
+          value: /identity
+    backendRefs:
+      - name: identity-api-stable
+        port: 80
+        weight: 90
+      - name: identity-api-canary
+        port: 80
+        weight: 10
+```
+
+Esos son los mismos dos Services del canary del **lab 09** (Paso 6.3). Con Ingress,
+el 90/10 sale de anotaciones específicas del controller; aquí es parte del estándar,
+y Argo Rollouts sabe manipularlo directamente.
+
+También trae routing por header y method, `RequestHeaderModifier` y redirects como
+campos del API — todo lo que en Ingress vivía en anotaciones o directamente no
+existía.
+
+### Paso 8.4: Certificados, que no es como esperas
+
+Aquí hay un detalle que conecta con el Paso 5 y que sorprende: en el LBC **no puedes
+configurar el certificado con el campo `certificateRefs`** del listener, que es lo
+que dice el estándar. El controller usa **descubrimiento por hostname**: pones el
+`hostname` en el listener del `Gateway` (o en la ruta) y el controller busca en ACM
+un certificado que cubra ese nombre.
+
+```yaml
+listeners:
+  - name: https
+    protocol: HTTPS
+    port: 443
+    hostname: lab.tudominio.com # el LBC busca el cert en ACM por este nombre
+```
+
+Es coherente con el modelo de AWS del Paso 5 (el certificado vive en ACM, no en un
+Secret), pero significa que un manifiesto de Gateway API copiado de la documentación
+genérica de Kubernetes no funciona igual aquí. La portabilidad del API es real para
+el ruteo y sigue teniendo costuras en TLS.
+
+Y una restricción a tener presente: **no se mezclan capas en el mismo Gateway.** Un
+`TCPRoute` y un `HTTPRoute` colgando del mismo objeto no está soportado, porque
+detrás hay dos productos distintos, NLB y ALB. Si necesitas ambos, son dos Gateways
+(o se encadenan: el LBC permite apuntar un listener de NLB a un listener de ALB).
+
+### Paso 8.5: ¿Migrar ahora?
+
+| Aspecto                     | Ingress                     | Gateway API                          |
+| --------------------------- | --------------------------- | ------------------------------------ |
+| Estado en Kubernetes        | Congelado, solo bugfixes    | El sucesor, en desarrollo activo     |
+| Configuración del vendor    | Anotaciones sin validar     | Campos tipados + CRDs del controller |
+| Separación por roles        | No, un solo objeto          | Sí: GatewayClass / Gateway / Route   |
+| Reparto de tráfico por peso | Anotaciones propietarias    | `weight` en el estándar              |
+| L4 (TCP/UDP)                | No                          | Sí, con NLB                          |
+| Estado observable           | Logs del controller         | `status.conditions` del objeto       |
+| Madurez del ecosistema      | Todo lo soporta             | GA en el LBC desde v3.0.0            |
+| Certificados en EKS         | Anotación `certificate-arn` | Descubrimiento por `hostname`        |
+
+Respuesta honesta: **no hay urgencia.** El Ingress del Paso 6 va a seguir
+funcionando por años, y para "un ALB con routing por path" no gana nada. Gateway API
+se justifica cuando aparece alguno de estos: varios equipos compartiendo el punto de
+entrada y queriendo separar permisos, necesidad de tráfico L4 y L7 con el mismo
+modelo, o canary con pesos como parte del API.
+
+Vale conocerlo porque es la dirección del proyecto. Escribir Ingress nuevo hoy no es
+un error; asumir que Ingress va a recibir funcionalidad nueva, sí.
+
+---
+
+## Paso 9: (Opcional) Probar la escalada con hostNetwork
 
 **SOLO PARA APRENDER, NUNCA EN PRODUCCIÓN.**
 
@@ -935,6 +1315,23 @@ Para APIs HTTP (como este lab), ALB es lo correcto.
 kubectl delete -f manifests/
 kubectl delete namespace apps
 
+# Gateway API (Paso 8), si lo probaste. Borrar las rutas antes del Gateway:
+# el Gateway es dueño del ALB y borrarlo primero puede dejar el LB huérfano
+kubectl delete httproute --all -n apps 2>/dev/null
+kubectl delete gateway --all -n apps 2>/dev/null
+kubectl delete gatewayclass alb 2>/dev/null
+
+# Confirmar que el ALB del Gateway se fue de verdad
+aws elbv2 describe-load-balancers --region $REGION \
+  --query 'LoadBalancers[?starts_with(LoadBalancerName, `k8s-apps-labgatew`)].LoadBalancerArn' \
+  --output text
+
+# cert-manager (Paso 5, Opción C), si lo instalaste
+kubectl delete certificate --all -A 2>/dev/null
+kubectl delete clusterissuer --all 2>/dev/null
+helm uninstall cert-manager -n cert-manager 2>/dev/null
+kubectl delete namespace cert-manager 2>/dev/null
+
 # ECR (opcional — mantener si vas a usar la imagen en labs 05-08)
 aws ecr delete-repository --repository-name $REPO_NAME --region $REGION --force
 
@@ -943,6 +1340,11 @@ aws acm delete-certificate --certificate-arn $CERT_ARN --region $REGION 2>/dev/n
 
 # El cluster y VPC se borran con el destroy.sh del lab base (02 o 03)
 ```
+
+> Las CRDs de Gateway API y de cert-manager quedan en el cluster después del
+> `helm uninstall`. Es intencional en Helm (borrarlas se llevaría los objetos), pero
+> si el cluster sobrevive al lab conviene saber que están ahí. Si vas a borrar el
+> cluster entero da igual.
 
 ---
 
@@ -965,3 +1367,19 @@ aws acm delete-certificate --certificate-arn $CERT_ARN --region $REGION 2>/dev/n
 5. **La imagen que construiste aquí te sirve para los labs 05, 06, 08 y 09.**
    No la borres. Dos endpoints (`/identity` y `/s3`) te enseñan credenciales,
    lectura de S3, balanceo, autoscaling y troubleshooting con la misma imagen.
+
+6. **"HTTPS" son dos problemas, no uno.** ACM cifra del usuario al balanceador y
+   ahí termina el handshake; del ALB al pod el tráfico va en claro por el VPC. Si el
+   requisito es cifrado entre servicios o certificados de webhooks, ACM no participa
+   y cert-manager sí. En EKS se usan los dos: ACM para el borde, cert-manager para
+   adentro.
+
+7. **El valor de cert-manager no es emitir, es renovar.** Un certificado se genera
+   con `openssl` en un minuto. Lo que causa incidentes es que expire un domingo. Un
+   controlador que renueva sin que nadie se acuerde es la diferencia real.
+
+8. **Las anotaciones de Ingress son la deuda que Gateway API paga.** Todo lo que
+   define el comportamiento del ALB vive en strings sin validar y específicos de AWS.
+   Gateway API los convierte en campos tipados y separa infraestructura de ruteo en
+   objetos distintos, lo que permite darle el ruteo al equipo de la app sin darle el
+   balanceador. Ingress está congelado: sigue funcionando, no va a mejorar.

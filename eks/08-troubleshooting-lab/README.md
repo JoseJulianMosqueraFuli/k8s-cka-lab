@@ -8,9 +8,13 @@ observar el síntoma, formular hipótesis, buscar evidencia, confirmar y corregi
 
 Este lab es el más relevante para el CKA: troubleshooting es el 30% del examen.
 
+Incluye la herramienta que hace falta cuando el flujo habitual se corta:
+`kubectl debug` y los contenedores efímeros, para los casos en que la imagen no
+tiene shell (distroless) o el nodo no tiene SSH (Bottlerocket en Auto Mode).
+
 **Se monta sobre:** un cluster desechable creado con eksctl (se destruye al final).
 **Costo estimado adicional:** ~$0.15/hr (cluster pequeño de 2 nodos t3.medium)
-**Tiempo:** ~2h 30m
+**Tiempo:** ~2h 45m
 
 **Herramientas necesarias:**
 
@@ -65,6 +69,113 @@ Antes de cada escenario, este es el flujo:
 5. Formular hipótesis        → "creo que es X porque..."
 6. Verificar y corregir      → cambiar una cosa, observar resultado
 ```
+
+### Cuando no hay shell: `kubectl debug`
+
+Hay un momento en que el flujo de arriba se corta. Necesitas mirar desde dentro del
+pod y esto pasa:
+
+```bash
+kubectl exec -it identity-api-xxx -n apps -- sh
+# OCI runtime exec failed: exec failed: unable to start container process:
+# exec: "sh": executable file not found in $PATH
+```
+
+No es un error de configuración. **La imagen no tiene shell.** La del lab 04 es
+`gcr.io/distroless/static:nonroot`: trae el binario de la app y nada más. Ni `sh`, ni
+`curl`, ni `ps`. Es deliberado — menos superficie de ataque, escaneo de ECR limpio —
+y significa que `kubectl exec` deja de ser una herramienta disponible.
+
+Lo mismo un nivel más abajo: en **Auto Mode** los nodos son Bottlerocket, un SO
+mínimo sin acceso SSH. En el lab 02 (EC2 con AMI de Amazon Linux) sí puedes entrar al
+nodo; en los labs 01 y 03 no hay nodo al que entrar.
+
+La respuesta a las dos cosas son los **contenedores efímeros**.
+
+**Caso 1: inspeccionar un pod que está corriendo.**
+
+```bash
+# Inyecta un contenedor con herramientas en el pod que ya existe
+kubectl debug -it identity-api-xxx -n apps \
+  --image=nicolaka/netshoot \
+  --target=api
+
+# Ahora sí tienes shell, y estás DENTRO del pod:
+# mismo network namespace, misma IP, mismos Services alcanzables
+curl localhost:8080/healthz
+nslookup identity-api.apps.svc.cluster.local
+ss -tlnp
+```
+
+El `--target=api` es la parte que importa: comparte el **process namespace** con ese
+contenedor, así que ves sus procesos y su `/proc`. Sin `--target` compartes la red
+del pod pero no ves los procesos de la app.
+
+Y el punto clave para diagnosticar en caliente: esto **no reinicia el pod ni lo
+modifica**. El contenedor efímero se agrega al pod vivo. Comparado con "edito el
+Deployment para meter un sidecar de debug", que reemplaza los pods y destruye
+justamente el estado que querías investigar, es otra cosa.
+
+**Caso 2: el pod está en `CrashLoopBackOff`.**
+
+Aquí el contenedor efímero no alcanza: el pod se está muriendo una y otra vez y no
+hay a dónde adjuntarse de forma estable. Se trabaja sobre una **copia**:
+
+```bash
+# Copia el pod y le cambia el comando para que no se muera
+kubectl debug identity-api-xxx -n apps \
+  --copy-to=debug-pod \
+  --container=api \
+  -- sleep 3600
+
+# El pod copia arranca con las mismas env vars, volúmenes y ServiceAccount,
+# pero sin ejecutar la app. Ahora puedes revisar la config que recibía
+kubectl exec -it debug-pod -n apps -- env | sort
+```
+
+Es la forma de responder "¿el pod tenía la variable de entorno correcta?" sin
+adivinar. Útil directo con el `ExternalSecret` del lab 05 y con los ConfigMaps
+generados del lab 09.
+
+**Caso 3: hay que mirar el nodo, y no hay SSH.**
+
+```bash
+kubectl debug node/i-0abc123 -it --image=amazonlinux:2023
+
+# El filesystem del nodo queda montado en /host
+chroot /host
+journalctl -u kubelet --no-pager | tail -50
+cat /etc/kubernetes/kubelet/config.json
+crictl ps
+```
+
+Esto crea un pod en los namespaces del host, con acceso al disco del nodo. Es cómo se
+diagnostica un kubelet en Bottlerocket sin abrir un puerto SSH ni un bastión.
+
+**Perfiles de permisos.** Por defecto el contenedor de debug no obtiene privilegios
+extra. Si necesitas capacidades de red o de sistema:
+
+```bash
+kubectl debug node/i-0abc123 -it --image=amazonlinux:2023 --profile=sysadmin
+kubectl debug -it <pod> --image=nicolaka/netshoot --profile=netadmin
+```
+
+Cuatro cosas que conviene saber antes de necesitarlas:
+
+- **Un contenedor efímero no se puede quitar.** No hay `kubectl debug --remove`. Vive
+  hasta que el pod muere. Si inyectaste tres intentos de debug, quedan los tres en el
+  `spec` del pod hasta que lo reinicies.
+- **No admite probes ni `resources`.** No participa del readiness del pod, y tampoco
+  cuenta para el scheduling.
+- **`kubectl debug node/...` deja un pod atrás.** Sale en `kubectl get pods` y hay que
+  borrarlo a mano al terminar. Es el residuo más común de una sesión de debug.
+- **La imagen de debug se baja de un registry.** En un cluster en subredes privadas
+  sin salida, `kubectl debug` falla con `ImagePullBackOff` justo cuando lo necesitas.
+  Y con las políticas del lab 11 puestas, un `nicolaka/netshoot` de Docker Hub puede
+  ser **rechazado por la política de registries aprobados**. Las dos veces el
+  diagnóstico se bloquea por una razón que no tiene nada que ver con el problema
+  original: vale tener una imagen de debug propia en ECR y una `PolicyException`
+  pensada de antemano.
 
 ---
 
@@ -521,14 +632,15 @@ dividir entre nodos.
 
 ## Resumen del método de diagnóstico
 
-| Paso | Herramienta                                   | Qué buscar                            |
-| ---- | --------------------------------------------- | ------------------------------------- |
-| 1    | `kubectl get`                                 | Estado general (Pending, Error, etc.) |
-| 2    | `kubectl describe`                            | Events al final del output            |
-| 3    | `kubectl logs`                                | Errores en el pod o controller        |
-| 4    | `aws elbv2/ec2/eks`                           | Estado de recursos AWS                |
-| 5    | CloudWatch Logs (si habilitado)               | Logs del control plane                |
-| 6    | `kubectl get events --sort-by=.lastTimestamp` | Timeline de eventos                   |
+| Paso | Herramienta                                   | Qué buscar                                        |
+| ---- | --------------------------------------------- | ------------------------------------------------- |
+| 1    | `kubectl get`                                 | Estado general (Pending, Error, etc.)             |
+| 2    | `kubectl describe`                            | Events al final del output                        |
+| 3    | `kubectl logs`                                | Errores en el pod o controller                    |
+| 4    | `aws elbv2/ec2/eks`                           | Estado de recursos AWS                            |
+| 5    | CloudWatch Logs (si habilitado)               | Logs del control plane                            |
+| 6    | `kubectl get events --sort-by=.lastTimestamp` | Timeline de eventos                               |
+| 7    | `kubectl debug` (contenedor efímero)          | Lo que solo se ve desde dentro del pod o del nodo |
 
 ### Comandos que deberías tener en muscle memory
 
@@ -551,18 +663,27 @@ kubectl describe pv <name>
 
 # DNS
 kubectl exec <pod> -- nslookup kubernetes.default
+
+# Cuando la imagen no tiene shell (distroless) o el nodo no tiene SSH (Bottlerocket)
+kubectl debug -it <pod> --image=nicolaka/netshoot --target=<container>
+kubectl debug <pod> --copy-to=debug-pod --container=<c> -- sleep 3600
+kubectl debug node/<node> -it --image=amazonlinux:2023   # rootfs del nodo en /host
 ```
 
 ---
 
 ## Troubleshooting del troubleshooting
 
-| Problema                          | Causa                                   | Fix                                        |
-| --------------------------------- | --------------------------------------- | ------------------------------------------ |
-| `kubectl` no responde             | kubeconfig apunta al cluster incorrecto | `kubectl config current-context`           |
-| No puedo ver logs de kube-system  | RBAC insuficiente                       | Usar un rol con permisos cluster-admin     |
-| `describe` no muestra eventos     | Los eventos expiraron (default 1h)      | Verificar en CloudWatch si está habilitado |
-| El fix no funciona inmediatamente | Controllers tienen reconciliation loops | Esperar 30-60s y verificar de nuevo        |
+| Problema                                                   | Causa                                                               | Fix                                                              |
+| ---------------------------------------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `kubectl` no responde                                      | kubeconfig apunta al cluster incorrecto                             | `kubectl config current-context`                                 |
+| No puedo ver logs de kube-system                           | RBAC insuficiente                                                   | Usar un rol con permisos cluster-admin                           |
+| `describe` no muestra eventos                              | Los eventos expiraron (default 1h)                                  | Verificar en CloudWatch si está habilitado                       |
+| El fix no funciona inmediatamente                          | Controllers tienen reconciliation loops                             | Esperar 30-60s y verificar de nuevo                              |
+| `kubectl exec` falla con `"sh": executable file not found` | La imagen es distroless, no tiene shell                             | `kubectl debug -it <pod> --image=nicolaka/netshoot --target=<c>` |
+| `kubectl debug` queda en `ImagePullBackOff`                | Sin salida a internet, o la política del lab 11 rechaza el registry | Imagen de debug propia en ECR + `PolicyException`                |
+| Puse tres contenedores de debug y siguen ahí               | Los contenedores efímeros no se pueden quitar                       | Reiniciar el pod; no existe `--remove`                           |
+| Quedó un pod raro después de debuggear un nodo             | `kubectl debug node/...` crea un pod real                           | Borrarlo a mano al terminar                                      |
 
 ---
 
@@ -605,3 +726,19 @@ aws ec2 describe-vpcs --filters Name=tag:eksctl.cluster.k8s.io/v1alpha1/cluster-
 6. **Cada escenario tiene una pista en los Events.** Kubernetes te dice qué
    falló — solo que a veces el mensaje es críptico. Aprender a leer esos mensajes
    es la habilidad real del troubleshooting.
+
+7. **`kubectl exec` no es un derecho adquirido.** Las decisiones correctas de
+   seguridad — imagen distroless, nodos Bottlerocket, sin SSH — eliminan justamente
+   las herramientas con las que estabas acostumbrado a debuggear. `kubectl debug` es
+   lo que reemplaza a las dos, y conviene practicarlo antes del incidente, no
+   durante.
+
+8. **Un contenedor efímero investiga sin alterar la escena.** Editar el Deployment
+   para meter un sidecar de debug reemplaza los pods y borra el estado que querías
+   ver. `kubectl debug` se adjunta al pod vivo. En un incidente, no destruir la
+   evidencia es la mitad del trabajo.
+
+9. **Las defensas también bloquean el diagnóstico.** Sin salida a internet o con la
+   política de registries del lab 11 activa, la imagen de debug no se puede bajar y
+   te quedas sin herramienta en el peor momento. Una imagen de debug en ECR y una
+   excepción prevista es parte de operar, no un atajo.

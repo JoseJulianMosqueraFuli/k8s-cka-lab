@@ -9,22 +9,27 @@ Write-Host "Account ID: $AccountId" -ForegroundColor DarkGray
 Write-Host ""
 
 # 1. Politicas de Kyverno
-Write-Host "[1/5] Borrando politicas y excepciones..." -ForegroundColor Yellow
+Write-Host "[1/6] Borrando politicas y excepciones..." -ForegroundColor Yellow
 kubectl delete clusterpolicy --all 2>$null
 kubectl delete policyexception -n kyverno --all 2>$null
 
 # 2. Kyverno
-Write-Host "[2/5] Desinstalando Kyverno..." -ForegroundColor Yellow
+Write-Host "[2/6] Desinstalando Kyverno..." -ForegroundColor Yellow
 helm uninstall kyverno -n kyverno 2>$null
 kubectl delete namespace kyverno 2>$null
 
 # 3. Namespaces de prueba
-Write-Host "[3/5] Borrando namespaces y pods de prueba..." -ForegroundColor Yellow
+Write-Host "[3/6] Borrando namespaces y pods de prueba..." -ForegroundColor Yellow
 kubectl delete namespace team-alpha 2>$null
 kubectl delete pod test-tagged test-latest test-latest2 with-resources 2>$null
 
-# 4. KMS key (schedule deletion)
-Write-Host "[4/5] Buscando KMS key del lab..." -ForegroundColor Yellow
+# 4. kube-bench (Paso 9) - un Job completado no se limpia solo
+Write-Host "[4/6] Borrando Job de kube-bench..." -ForegroundColor Yellow
+kubectl delete job kube-bench 2>$null
+kubectl delete job kube-bench-node 2>$null
+
+# 5. KMS key (schedule deletion)
+Write-Host "[5/6] Buscando KMS key del lab..." -ForegroundColor Yellow
 $kmsKey = aws kms list-aliases --region $Region `
     --query "Aliases[?AliasName=='alias/eks-secrets'].TargetKeyId" --output text 2>$null
 if ($kmsKey -and $kmsKey -ne "None") {
@@ -39,8 +44,8 @@ if ($kmsKey -and $kmsKey -ne "None") {
     Write-Host "  No se encontro KMS key" -ForegroundColor DarkYellow
 }
 
-# 5. PSS labels (revertir)
-Write-Host "[5/5] Removiendo labels PSS de namespaces..." -ForegroundColor Yellow
+# 6. PSS labels (revertir)
+Write-Host "[6/6] Removiendo labels PSS de namespaces..." -ForegroundColor Yellow
 $namespaces = kubectl get namespaces -o jsonpath='{.items[*].metadata.name}' 2>$null
 if ($namespaces) {
     foreach ($ns in $namespaces.Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries)) {

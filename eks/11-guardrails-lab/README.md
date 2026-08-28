@@ -10,15 +10,23 @@ El punto clave: empezar en modo Audit (ver qué se rompería) antes de pasar a
 Enforce (rechazar de verdad). El error clásico es enforce desde el día uno y
 romper todos los deploys.
 
+Alrededor de la admisión, las otras dos capas de la misma pregunta: **Trivy** para
+detener el artefacto vulnerable antes de que exista, y **kube-bench** para auditar el
+cluster contra el CIS Benchmark de EKS.
+
 **Se monta sobre:** el cluster del lab 02 (EC2) o 03 (Auto Mode).
-**Costo estimado adicional:** ~$0.00 (Kyverno son solo pods)
-**Tiempo:** ~2h
+**Costo estimado adicional:** ~$0.00 (Kyverno, Trivy y kube-bench son solo pods o CLI)
+**Tiempo:** ~2h 45m
 
 **Herramientas necesarias:**
 
 - AWS CLI v2
 - kubectl
 - helm
+- trivy (Paso 9; también corre como acción de GitHub en el pipeline del lab 09)
+
+> El Job de kube-bench del Paso 9 necesita `hostPath` y `hostPID`, así que solo corre
+> sobre el cluster del **lab 02 (EC2)**. En Auto Mode (Bottlerocket) y Fargate no.
 
 **Conexión CKA:** `domains/01-cluster-architecture` — security, admission controllers (25%)
 
@@ -491,6 +499,143 @@ spec:
               - image: "<ACCOUNT_ID>.dkr.ecr.*.amazonaws.com/*"
 ```
 
+### Trivy: mover el escaneo al pipeline
+
+El scanning de ECR tiene un problema de **momento**: escanea cuando la imagen ya
+está en el registry. Es decir, después de que el pipeline la construyó, la etiquetó
+y la publicó. Encontrar el CVE ahí significa que el artefacto malo ya existe y
+alguien puede desplegarlo.
+
+Trivy corre en el pipeline, antes del push, y falla el build:
+
+```bash
+# Local, contra la imagen que acabas de construir
+trivy image --severity HIGH,CRITICAL --exit-code 1 $IMAGE
+```
+
+```yaml
+# En el workflow del lab 09, entre "build" y "push"
+- name: Escanear la imagen antes de publicarla
+  uses: aquasecurity/trivy-action@master
+  with:
+    image-ref: ${{ env.IMAGE }}
+    severity: HIGH,CRITICAL
+    exit-code: "1" # rompe el build si encuentra algo
+    ignore-unfixed: true # sin parche disponible no es actionable
+```
+
+Ese `ignore-unfixed: true` es la diferencia entre una puerta que se usa y una que
+todo el mundo desactiva a la semana. Un CVE sin fix upstream no lo puedes arreglar:
+si rompe el build, el equipo aprende a saltarse el paso.
+
+Trivy además cubre dos cosas que ECR no:
+
+```bash
+# Terraform del lab 09: buckets públicos, security groups abiertos, cifrado apagado
+trivy config ./infra/terraform
+
+# Los manifiestos y charts del lab 09, contra las mismas reglas que las políticas
+trivy config ./charts/identity-api
+```
+
+Escanear el Terraform importa porque el CVE de una imagen afecta un pod, mientras
+que un `0.0.0.0/0` en un security group afecta el cluster entero. Y es el mismo
+razonamiento de Kyverno aplicado un paso antes: mejor rechazarlo en el PR que en la
+admisión.
+
+**Los tres momentos, y por qué hacen falta los tres:**
+
+| Momento        | Herramienta        | Qué detiene                                  |
+| -------------- | ------------------ | -------------------------------------------- |
+| En el PR       | `trivy config`     | IaC y manifiestos mal configurados           |
+| En el build    | `trivy image`      | Que el artefacto vulnerable llegue a existir |
+| En el registry | ECR scanning       | CVEs publicados **después** del build        |
+| En la admisión | Kyverno (este lab) | Lo que igual intentó desplegarse             |
+
+El tercero no es redundante: un CVE puede publicarse meses después de que
+construiste la imagen. El escaneo del pipeline solo conoce lo que se sabía ese día;
+el del registry re-evalúa lo que ya está guardado.
+
+### kube-bench: auditar el cluster contra el CIS Benchmark
+
+Todo lo anterior audita **lo que despliegas**. kube-bench audita **el cluster**,
+contra el CIS Kubernetes Benchmark. Hay un benchmark específico para EKS, porque en
+un cluster gestionado la mitad de los controles del benchmark genérico no aplican:
+no tienes acceso al API server ni a etcd, y esos controles son responsabilidad de
+AWS.
+
+```yaml
+# manifests/kube-bench-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kube-bench
+  namespace: default
+spec:
+  template:
+    spec:
+      hostPID: true
+      restartPolicy: Never
+      containers:
+        - name: kube-bench
+          image: docker.io/aquasec/kube-bench:latest
+          command:
+            [
+              "kube-bench",
+              "run",
+              "--targets",
+              "node",
+              "--benchmark",
+              "eks-1.2.0",
+            ]
+          volumeMounts:
+            - name: var-lib-kubelet
+              mountPath: /var/lib/kubelet
+              readOnly: true
+            - name: etc-kubernetes
+              mountPath: /etc/kubernetes
+              readOnly: true
+      volumes:
+        - name: var-lib-kubelet
+          hostPath: { path: "/var/lib/kubelet" }
+        - name: etc-kubernetes
+          hostPath: { path: "/etc/kubernetes" }
+```
+
+```bash
+kubectl apply -f manifests/kube-bench-job.yaml
+kubectl wait --for=condition=complete job/kube-bench --timeout=120s
+kubectl logs job/kube-bench
+
+# [INFO] 3 Worker Node Security Configuration
+# [PASS] 3.1.1 Ensure that the kubeconfig file permissions are set to 644
+# [WARN] 3.2.9 Ensure that the --event-qps argument is set to 0
+# ...
+# == Summary == 18 checks PASS, 2 checks FAIL, 8 checks WARN
+```
+
+Tres avisos sobre esto, porque es donde se pierde el tiempo:
+
+- **Solo aplica `--targets node`.** En EKS no puedes auditar el control plane porque
+  no lo operas. Un informe que reclama controles del API server está usando el
+  benchmark equivocado.
+- **En Auto Mode y Fargate no corre.** Necesita `hostPath` sobre el filesystem del
+  nodo. En Bottlerocket los paths difieren y en Fargate no hay nodo. Este Job es
+  para el cluster del **lab 02** (EC2).
+- **Es la única cosa de este lab que necesita `hostPath` y `hostPID`** — justo lo que
+  las políticas del Paso 4 prohíben. Va a ser rechazado por tu propia política, y eso
+  es correcto: es el caso de uso legítimo de una `PolicyException` del Paso 10, con
+  su namespace acotado y su justificación escrita.
+
+Ese último punto es más interesante que el informe. Un `[FAIL]` de kube-bench es una
+lista de tareas; una herramienta de seguridad que solo funciona violando tus propias
+reglas es una decisión que hay que tomar a conciencia y dejar documentada.
+
+> **Compliance formal (PCI, SOC2) queda fuera a propósito.** kube-bench te da la
+> parte de ingeniería: qué está mal configurado y contra qué estándar. El resto de
+> una auditoría es evidencia, procesos y controles organizacionales, que no es un
+> ejercicio de lab.
+
 ---
 
 ## Paso 10: PolicyReport y Exceptions
@@ -568,6 +713,9 @@ kubectl delete namespace kyverno
 kubectl delete namespace team-alpha
 kubectl delete pod test-tagged test-latest with-resources 2>/dev/null
 
+# kube-bench (Paso 9). Un Job completado no se borra solo
+kubectl delete job kube-bench 2>/dev/null
+
 # KMS key (schedule deletion — no se borra inmediatamente)
 aws kms schedule-key-deletion --key-id $KMS_KEY_ID \
   --pending-window-in-days 7 --region $REGION
@@ -600,3 +748,23 @@ aws kms schedule-key-deletion --key-id $KMS_KEY_ID \
 6. **Las exclusiones deben ser el camino difícil.** Si excluir es tan fácil como
    agregar un label, la política pierde su sentido. Las excepciones deben
    requerir un PR aprobado por seguridad.
+
+7. **La admisión es la última línea, no la primera.** Cuando Kyverno rechaza un pod,
+   el artefacto vulnerable ya se construyó, se publicó y alguien intentó desplegarlo.
+   Trivy en el PR y en el build es más barato en todo sentido: falla antes, falla más
+   cerca de quien puede arreglarlo, y no hay nada que limpiar.
+
+8. **El escaneo del registry no es redundante con el del pipeline.** El pipeline solo
+   conoce los CVEs publicados el día del build. ECR re-evalúa lo que ya está guardado.
+   Una imagen que pasó limpia en marzo puede estar comprometida en junio sin que nadie
+   la haya tocado.
+
+9. **Un `ignore-unfixed` de más vale que una puerta desactivada.** Si el escaneo falla
+   el build por CVEs sin parche disponible, el equipo aprende a saltarse el paso, y
+   entonces no tienes control. Un control que la gente evade es peor que uno más
+   permisivo que la gente respeta.
+
+10. **La herramienta que audita seguridad viola tus políticas de seguridad.**
+    kube-bench necesita `hostPath` y `hostPID`, justo lo que prohibiste en el Paso 4.
+    No es una contradicción a resolver, es el ejemplo canónico de por qué existen las
+    excepciones — y de por qué van acotadas, escritas y en Git.
