@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: identity-api-irsa
+  namespace: apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: identity-api-irsa
+  template:
+    metadata:
+      labels:
+        app: identity-api-irsa
+    spec:
+      serviceAccountName: identity-api-irsa
+      containers:
+        - name: api
+          image: <TU_IMAGE>
+          ports:
+            - containerPort: 8080
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # El webhook de IRSA inyecta AWS_ROLE_ARN y AWS_WEB_IDENTITY_TOKEN_FILE,
+            # pero NO la region. Sin esto el SDK falla con "Missing Region" antes
+            # de siquiera intentar el AssumeRoleWithWebIdentity (lo vimos en el lab 04).
+            - name: AWS_REGION
+              value: us-east-1
+            - name: S3_BUCKET
+              value: <TU_BUCKET>
+            - name: S3_KEY
+              value: lab-data/secret.txt
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi

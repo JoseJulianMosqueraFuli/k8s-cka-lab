@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: identity-api-podid
+  namespace: apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: identity-api-podid
+  template:
+    metadata:
+      labels:
+        app: identity-api-podid
+    spec:
+      serviceAccountName: identity-api-podid
+      containers:
+        - name: api
+          image: <TU_IMAGE>
+          ports:
+            - containerPort: 8080
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Pod Identity inyecta AWS_CONTAINER_CREDENTIALS_FULL_URI y el token,
+            # tampoco la region. Mismo motivo que en deploy-irsa.yaml.
+            - name: AWS_REGION
+              value: us-east-1
+            - name: S3_BUCKET
+              value: <TU_BUCKET>
+            - name: S3_KEY
+              value: lab-data/secret.txt
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi

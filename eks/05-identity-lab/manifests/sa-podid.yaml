@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: identity-api-podid
+  namespace: apps
+# Sin anotaciones: con Pod Identity la union SA -> rol vive en la API de EKS
+# (aws eks create-pod-identity-association), no en el manifiesto.

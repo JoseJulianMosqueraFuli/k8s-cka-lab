@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: identity-api-irsa
+  namespace: apps
+  annotations:
+    # La anotacion es LO QUE ACTIVA IRSA. Sin ella el webhook de EKS no
+    # inyecta el token proyectado ni las variables AWS_* en el pod.
+    eks.amazonaws.com/role-arn: arn:aws:iam::<ACCOUNT_ID>:role/eks-lab-s3-reader-irsa
